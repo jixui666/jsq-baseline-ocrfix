@@ -1,0 +1,219 @@
+name: Build IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+concurrency:
+  group: build-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          xcode-select -p
+
+      - name: Lint plists
+        run: |
+          plutil -lint ThreeOneOSFive/Info.plist
+          plutil -lint ThreeOneOSFive/ThreeOneOSFive.entitlements
+          xmllint --noout ThreeOneOSFive.xcodeproj/xcshareddata/xcschemes/3105.xcscheme
+
+      # ---------------------------------------------------------------- 加固: 机密
+      - name: Python crypto deps
+        run: |
+          # runner 上的 python3 是 externally-managed，--user 装会被 PEP 668 拦，
+          # 所以建一个 venv 并把它的 bin 前置到 PATH，后续 python3 都走这里。
+          python3 -m venv .venv
+          .venv/bin/pip install --quiet --upgrade pip
+          .venv/bin/pip install --quiet cryptography
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          .venv/bin/python -c "import cryptography; print('cryptography', cryptography.__version__)"
+
+      - name: Restore integrity signing key
+        env:
+          INTEGRITY_PRIVATE_KEY_PEM: ${{ secrets.INTEGRITY_ED25519_KEY_PEM }}
+        run: |
+          python3 tools/keygen.py
+          echo "pubkey: $(cat tools/integrity_pubkey.hex)"
+
+      - name: Generate encrypted secrets
+        env:
+          SECRETS_JSON: ${{ secrets.SECRETS_JSON }}
+        run: |
+          python3 tools/gen_secrets.py
+          python3 tools/verify_secrets.py
+
+      - name: Verify Swift decryption of the generated secrets (macOS)
+        env:
+          SECRETS_JSON: ${{ secrets.SECRETS_JSON }}
+        run: |
+          # SecureBox 是纯 Foundation/CryptoKit，在 macOS 上行为与 iOS 一致，
+          # 所以这里能提前发现"生成器与运行时对不上"（真机上表现为
+          # Configuration unavailable —— shell.txt 的 key/iv 取不到）。
+          swiftc -O -o /tmp/swiftcheck \
+            ThreeOneOSFive/Security/Generated/Secrets.generated.swift \
+            ThreeOneOSFive/Security/SecureBox.swift \
+            tools/swiftcheck/main.swift
+          /tmp/swiftcheck
+
+      - name: Normalize bundled binary permissions
+        run: |
+          chmod +x ThreeOneOSFive/Frameworks/apptrace.framework/apptrace || true
+          chmod +x ThreeOneOSFive/Frameworks/libapptracecore.framework/libapptracecore || true
+          ls -l ThreeOneOSFive/Frameworks/apptrace.framework/apptrace
+          ls -l ThreeOneOSFive/Frameworks/libapptracecore.framework/libapptracecore
+
+      - name: List project
+        run: |
+          xcodebuild -project ThreeOneOSFive.xcodeproj -list
+
+      - name: Build .app (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ThreeOneOSFive.xcodeproj \
+            -scheme 3105 \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build.log
+
+      - name: Verify build output
+        run: |
+          APP="build/Build/Products/Release-iphoneos/JSQ.app"
+          if [ ! -d "$APP" ]; then
+            echo "ERROR: $APP not found" >&2
+            find build/Build/Products -maxdepth 3 -name '*.app' -print >&2 || true
+            tail -n 200 build.log >&2 || true
+            exit 1
+          fi
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist"
+          ls -lh "$APP"
+          # 确认预留的 __integrity 段真的被链接进去了
+          otool -l "$APP/JSQ" | grep -A3 '__integrity' || {
+            echo "ERROR: __DATA,__integrity section missing — check OTHER_LDFLAGS" >&2
+            exit 1
+          }
+          # 公钥必须在只读的 __TEXT 段：放在 __DATA 会被换掉，Ed25519 验签随之失效
+          # otool -l 里 "sectname __pubkey" 的下一行才是 "segname __TEXT"
+          otool -l "$APP/JSQ" | grep -A2 'sectname __pubkey' | grep -q 'segname __TEXT' || {
+            echo "ERROR: __TEXT,__pubkey section missing or in the wrong segment" >&2
+            otool -l "$APP/JSQ" | grep -B2 -A6 '__pubkey' >&2 || true
+            exit 1
+          }
+
+      # ---------------------------------------------------------------- 加固: 完整性
+      - name: Self-test packer logic
+        run: python3 tools/selftest_integrity.py
+
+      - name: Resign compatibility test
+        run: |
+          # 回归：模拟 codesign 往 load commands 插 LC_CODE_SIGNATURE —— 校验必须仍然通过；
+          # 改 __text 必须被抓到。测试会改动 app，后面会重新打清单。
+          APP="build/Build/Products/Release-iphoneos/JSQ.app"
+          python3 tools/selftest_resign.py --app "$APP" --profile strict
+
+      - name: Sign & embed integrity manifest (sideload = default)
+        run: |
+          APP="build/Build/Products/Release-iphoneos/JSQ.app"
+          set -e
+          # 默认包用 enterprise profile：重签工具（Sideloadly / AltStore / 爱思）一定会改
+          # Info.plist 的 MinimumOSVersion / UIRequiredDeviceCapabilities /
+          # UISupportsDocumentBrowser，strict 模式会把它判成篡改，装完启动即退。
+          python3 tools/integrity_pack.py --app "$APP" --profile enterprise
+          python3 tools/integrity_pack.py --app "$APP" --profile enterprise --verify
+          python3 tools/make_ipa.py --app "$APP" --out JSQ-unsigned.ipa
+          # 附带的 strict 包：连 Info.plist 一起锁，适用于不改 Info.plist 的签名流程
+          python3 tools/integrity_pack.py --app "$APP" --profile strict
+          python3 tools/integrity_pack.py --app "$APP" --profile strict --verify
+          python3 tools/make_ipa.py --app "$APP" --out JSQ-unsigned-strict.ipa
+
+      - name: Verify packaged IPA
+        run: |
+          set -e
+          for f in JSQ-unsigned.ipa JSQ-unsigned-strict.ipa; do
+            sz=$(stat -f%z "$f")
+            echo "$f: $sz bytes"
+            # 空 zip 只有 22 字节。少一次大小校验就会把空包发给手机。
+            [ "$sz" -gt 1000000 ] || { echo "ERROR: $f is only $sz bytes"; exit 1; }
+            unzip -l "$f" | grep -q 'Payload/JSQ.app/JSQ' \
+              || { echo "ERROR: $f missing main executable"; exit 1; }
+            unzip -l "$f" | grep -q 'Payload/JSQ.app/Frameworks/apptrace.framework/apptrace' \
+              || { echo "ERROR: $f missing Frameworks"; exit 1; }
+          done
+          unzip -l JSQ-unsigned.ipa | head -n 14
+
+      # ---------------------------------------------------------------- 诊断包
+      - name: Build .app (diagnostic, never exits)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ThreeOneOSFive.xcodeproj \
+            -scheme 3105 \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build-safe \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            SWIFT_ACTIVE_COMPILATION_CONDITIONS='INTEGRITY_SAFE_MODE' \
+            build 2>&1 | tee build-safe.log
+
+      - name: Package diagnostic IPA (safe mode)
+        run: |
+          set -e
+          APP="build-safe/Build/Products/Release-iphoneos/JSQ.app"
+          [ -d "$APP" ] || { echo "ERROR: safe build output missing"; tail -n 120 build-safe.log; exit 1; }
+          python3 tools/integrity_pack.py --app "$APP" --profile enterprise
+          python3 tools/integrity_pack.py --app "$APP" --profile enterprise --verify
+          python3 tools/make_ipa.py --app "$APP" --out JSQ-unsigned-safe.ipa
+
+      - name: Collect signing material
+        run: |
+          cp ThreeOneOSFive/ThreeOneOSFive.entitlements JSQ.entitlements
+          cat JSQ.entitlements
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: JSQ-unsigned-ipa
+          path: |
+            JSQ-unsigned.ipa
+            JSQ-unsigned-strict.ipa
+            JSQ-unsigned-safe.ipa
+            JSQ.entitlements
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Upload dSYM
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: JSQ-dSYM
+          path: |
+            build/Build/Products/Release-iphoneos/JSQ.app.dSYM
+            build-safe/Build/Products/Release-iphoneos/JSQ.app.dSYM
+          if-no-files-found: ignore
