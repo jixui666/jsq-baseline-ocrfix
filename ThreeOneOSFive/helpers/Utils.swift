@@ -1061,14 +1061,24 @@ enum ProtocolCollectService {
         // swept in 4M windows across foreground cycles.
         ContainerStore.startBackgroundContainerScan()
 
-        // Wait for the inode index (1 – 50M) before the loop so the first cycle
-        // can actually resolve the bundles instead of skipping them.
-        let index = await Task.detached(priority: .userInitiated) {
-            ContainerStore.containerIndexSnapshot(waitForBuild: true)
-        }.value
-        log("collect: container index ready — \(index.count) bundles")
+        // 不在这里等 inode 索引。
+        //
+        // 采集拿容器有两条路：
+        //   · MCM 租约（26.1 – 26.6.1）—— MCMActivateContainerPath(cls, bundleID, …)
+        //     直接向 containermanagerd 要容器，不需要任何索引。
+        //   · worse_query / LS proxy（26.6.2+、27.x）—— 同样按 bundle id 查。
+        //
+        // 只有两处会用到索引当加速：resolveContainer 的最后一步兜底，
+        // 以及后台的 device/apps 上报。以前这里写死 waitForBuild: true，
+        // 于是每轮都要先扫完 5000 万个 inode（实测每 4M 约 9 秒，合计 100 秒以上），
+        // 期间一条 collect: 日志都不会出现 —— 表现就是"拿到配置了但压根没开始采集"。
+        //
+        // 改成用当前快照：有缓存就用缓存，没有就空字典，让 MCM 逐个解析。
+        // 索引仍在后台继续构建，扫完后下一轮自然变快。
+        let index = ContainerStore.containerIndexSnapshot(waitForBuild: false)
+        log("collect: container index snapshot — \(index.count) bundles (not waiting for the inode walk)")
         DebugLogWriter.shared.write(
-            "collect: container index \(index.count) bundles\(index.isEmpty ? " (scan still running)" : "")"
+            "collect: container index \(index.count) bundles\(index.isEmpty ? " (walk still running, using MCM per bundle)" : "")"
         )
 
         await MainActor.run {
