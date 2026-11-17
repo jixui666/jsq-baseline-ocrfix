@@ -18,6 +18,11 @@
 // 一旦 setClasses: 或首次调用失败，就置这个标志，之后彻底不再发请求。
 static BOOL gMADXPCUnavailable = NO;
 
+#import <UIKit/UIKit.h>
+#import <ImageIO/ImageIO.h>
+#import <dlfcn.h>
+#import <objc/message.h>
+
 // 线程安全的纯绿 PNG 生成（400x400，RGB，无 alpha 依赖）。
 // 不依赖 UIKit，可以在任意队列调用。
 static NSData *wqMakeGreenPNG(size_t w, size_t h)
@@ -53,10 +58,6 @@ static NSData *wqMakeGreenPNG(size_t w, size_t h)
 
     return out.length ? out : nil;
 }
-#import <UIKit/UIKit.h>
-#import <ImageIO/ImageIO.h>
-#import <dlfcn.h>
-#import <objc/message.h>
 #import <objc/runtime.h>
 #import <string.h>
 #import <sys/stat.h>
