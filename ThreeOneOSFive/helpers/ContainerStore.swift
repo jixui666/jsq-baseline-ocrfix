@@ -158,6 +158,13 @@ enum ContainerStore {
         let detail = lookupError.map(String.init) ?? "unavailable"
         log("patch: MHA-C2 could not resolve \(bundleID), detail=\(detail)")
 
+        // MCM 路由（26.1.1 – 26.6.1）：上面 MHA-C2 失败就是这个 bundle 拿不到，
+        // 再扫 5000 万 inode 也没有意义（那条路是 27.x 没租约时的替代品）。
+        if KernelExploit.route.usesMCMLease {
+            log("patch: MCM route — \(bundleID) has no MHA-C2 lease, skipping the inode walk")
+            return nil
+        }
+
         // iOS 26.6.2+ / 27.x: no kernel stage, so resolve through the userland
         // extension layer first (anchor + relative part-domain sweep) and only
         // then fall back to the inode/metadata walk.

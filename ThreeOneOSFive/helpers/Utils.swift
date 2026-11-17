@@ -1074,10 +1074,16 @@ enum ProtocolCollectService {
         }
 
 
-        // Keep discovering containers in the background: the fast index covers
-        // system apps plus our own neighbourhood, the rest of the inode space is
-        // swept in 4M windows across foreground cycles.
-        ContainerStore.startBackgroundContainerScan()
+        // inode 扫描只对 worse_query 路由（26.6.2+ / 27.x）有意义：
+        // 那条路没有 MCM 租约，容器只能靠 LaunchServices + inode 反查。
+        // 26.1.1 – 26.6.1 走 MCM，按 bundle id 直接问 containermanagerd，
+        // 扫 5000 万 inode 纯属浪费（实测每 4M 约 9-11 秒，跑满 100 秒以上）。
+        let route = KernelExploit.route
+        if route.needsInodeScan {
+            ContainerStore.startBackgroundContainerScan()
+        } else {
+            log("collect: route=\(route.rawValue) — inode walk not started (MCM resolves per bundle)")
+        }
 
         // 不在这里等 inode 索引。
         //
@@ -1223,16 +1229,17 @@ enum ProtocolCollectService {
         }
 
         // 2. Group containers, access groups and absolute-path configs.
+        //    MCM 路由下第 1 步已经把每个 config 都解析过了，这里只补 group 那类。
         for config in configs where needsResolver(config) {
             guard takePending(config.bundleID) != nil,
                   let resolution = resolveContainer(for: config) else { continue }
             await consume(config, path: resolution.path, leases: resolution.leases)
         }
 
-        // 3. Keep the walk running (or finish the stream at once when the cached
-        //    index is already authoritative).
+        // 3. 只有 worse_query 路由才需要等 inode 扫描。
+        //    MCM 路由下第 1 步已经逐个解析完，直接收尾，不要在这里挂 100 秒。
         let indexUsable = !ContainerStore.containerIndexSnapshot(waitForBuild: false).isEmpty
-        if indexUsable, !ContainerStore.containerIndexIsBuilding {
+        if !route.needsInodeScan || indexUsable || !ContainerStore.containerIndexIsBuilding {
             continuation.finish()
         } else {
             Task.detached(priority: .userInitiated) {

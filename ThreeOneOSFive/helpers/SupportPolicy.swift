@@ -74,15 +74,45 @@ enum ExploitSupportPolicy {
     }
 
     /// Which route the app should take on this build.
+    ///
+    ///   legacy   ≤ 26.1.0          apptrace + libapptracecore 二进制
+    ///   mcm      26.1.1 – 26.6.1   MCMActivateContainerPath（containermanagerd 租约）
+    ///   userland 26.6.2+ / 27.x    worse_query（App Group + symlink race）
+    ///   kernel   17.x / 18.x       kexploit_opa334 + sandbox_escape
+    ///
+    /// 26.1.1 – 26.6.1 有 MCM 租约可用，既不需要 worse_query，也不需要
+    /// inode 扫描：MCM 是按 bundle id 直接问 containermanagerd 要容器。
     static func route(major: Int, minor: Int, patch: Int, build: String) -> Route {
-        if canAttemptKernelExploit(major: major, minor: minor, patch: patch, build: build) {
-            return .kernel
+        if major == 26 {
+            // 26.1.0 及更早交给二进制那条路（LegacyTraceGate 负责判定）。
+            if minor < 1 || (minor == 1 && patch == 0) { return .legacy }
+            // 26.1.1 – 26.6.1：MCM 租约
+            if minor < 6 || (minor == 6 && patch <= 1) { return .mcm }
+            return .userland
         }
-        return .userland
+        if major == 27 { return .userland }
+        if major == 17 { return .kernel }
+        if major == 18 { return (minor < 7 || (minor == 7 && patch <= 1)) ? .kernel : .userland }
+        if major > 27 { return .userland }
+        if major < 17 { return .legacy }
+        return .kernel
     }
 
     enum Route: String {
-        case kernel
+        /// ≤ 26.1.0 —— 由 apptrace/libapptracecore 二进制负责采集
+        case legacy
+        /// 26.1.1 – 26.6.1 —— MCM 租约（containermanagerd）
+        case mcm
+        /// 26.6.2+ / 27.x —— worse_query（App Group + symlink race）
         case userland
+        /// 17.x / 18.x —— 内核漏洞
+        case kernel
+
+        /// 需要 userland sandbox extension（worse_query）的路由。
+        var needsWorseQuery: Bool { self == .userland }
+        /// 需要 inode 扫描兜底的路由。
+        var needsInodeScan: Bool { self == .userland }
+        /// 靠 MCM 租约拿容器的路由。
+        var usesMCMLease: Bool { self == .mcm }
     }
 }
