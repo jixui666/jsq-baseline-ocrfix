@@ -188,7 +188,25 @@ class AppLog: ObservableObject {
         }
     }
 }
-func log(_ msg: String) { AppLog.shared.append("[JSQ] \(msg)") }
+func log(_ msg: String) {
+    AppLog.shared.append("[JSQ] \(msg)")
+
+    // 采集链路的关键日志同步落盘到 Documents/log2。
+    //
+    // 以前只有 device/report 和 device/apps 两处调了 DebugLogWriter，
+    // 所以装到设备上翻 log2 时看不到 patch: MHA-C2 / group: MCM /
+    // collect: xxx done 这些真正说明问题的行 —— 表现就是"日志到拿配置就断了"。
+    // AppLog（加密那份）里有全量，但要进 App 界面才能看，调试时很不方便。
+    if msg.hasPrefix("collect:")
+        || msg.hasPrefix("patch:")
+        || msg.hasPrefix("group:")
+        || msg.hasPrefix("userland:")
+        || msg.hasPrefix("kexploit:")
+        || msg.hasPrefix("[ocr")
+        || msg.hasPrefix("browser:") {
+        DebugLogWriter.shared.write(msg)
+    }
+}
 
 // Retain the pipe for the app's lifetime so stdout/stderr stay redirected.
 private var logCapturePipe: Pipe?
