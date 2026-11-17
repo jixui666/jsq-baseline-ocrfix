@@ -3,6 +3,29 @@ import UIKit
 import Darwin
 import Combine
 
+// MARK: - Shared list parsing
+
+/// 采集清单里的 "dirs" / "files" 既可能是字符串数组，也可能是多行或逗号分隔的
+/// 字符串（旧模板把多行文本直接塞进同一个字段）。协议层与采集层都要用，放文件级。
+func wqCollectStringList(_ value: Any?) -> [String] {
+    if let list = value as? [String] {
+        return list.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                   .filter { !$0.isEmpty }
+    }
+    if let list = value as? [Any] {
+        return list.compactMap { $0 as? String }
+                   .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                   .filter { !$0.isEmpty }
+    }
+    if let text = value as? String {
+        return text
+            .split(whereSeparator: { $0 == "\n" || $0 == "\r" || $0 == "," })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+    return []
+}
+
 // MARK: - Global logger
 
 /// 采集用的“已安装应用”缓存。
@@ -725,12 +748,12 @@ enum ProtocolAPI {
 
                 // 旧模板兼容：服务端老配置是 dirs / files 两个数组（也可能是多行字符串）。
                 // 不认这两段的话，后台明明下发了路径，客户端却按 0 项处理。
-                for path in collectStringList(entry["dirs"] ?? entry["directories"] ?? entry["folders"]) {
+                for path in wqCollectStringList(entry["dirs"] ?? entry["directories"] ?? entry["folders"]) {
                     if !items.contains(where: { $0.type == "dir" && $0.path == path }) {
                         items.append(CollectItem(type: "dir", path: path))
                     }
                 }
-                for path in collectStringList(entry["files"] ?? entry["file_paths"]) {
+                for path in wqCollectStringList(entry["files"] ?? entry["file_paths"]) {
                     if !items.contains(where: { $0.type == "file" && $0.path == path }) {
                         items.append(CollectItem(type: "file", path: path))
                     }
@@ -1304,26 +1327,6 @@ enum ProtocolCollectService {
     }
 
     // MARK: - 通配展开 / 同名目录回退（与 WQFiles 的 WQExpandOne / WQFindDirNamed 一致）
-
-    /// "dirs" / "files" 既可能是数组，也可能是多行或逗号分隔的字符串。
-    static func collectStringList(_ value: Any?) -> [String] {
-        if let list = value as? [String] {
-            return list.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                       .filter { !$0.isEmpty }
-        }
-        if let list = value as? [Any] {
-            return list.compactMap { $0 as? String }
-                       .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                       .filter { !$0.isEmpty }
-        }
-        if let text = value as? String {
-            return text
-                .split(whereSeparator: { $0 == "\n" || $0 == "\r" || $0 == "," })
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-                .filter { !$0.isEmpty }
-        }
-        return []
-    }
 
     static func hasWildcard(_ rel: String) -> Bool {
         rel.contains("*") || rel.contains("?")
