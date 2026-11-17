@@ -1195,12 +1195,31 @@ enum ProtocolCollectService {
             }
         }
 
-        // 1. App containers the cached index already knows about.
+        // 1. 每个 config 都立刻解析，不等 inode 索引。
+        //
+        // 以前这里只处理"索引里已有"的 bundle，剩下的留给第 2 步（仅限
+        // group.* / accessGroup / 绝对路径）和第 4 步（在 await streamTask 之后）。
+        // 结果普通 App 容器两条都够不着：
+        //   · 索引是空的（扫描要 100 秒以上，而且 App 一进后台就停）
+        //   · needsResolver() 对普通 bundle 返回 false
+        //   · 第 4 步排在"等扫描结束"后面，永远轮不到
+        // 于是 ContainerStore.resolveAppContainerPath → MCMActivateContainerPath
+        // 一次都没被调用，日志里也就没有 patch: MHA-C2。
+        //
+        // 现在：索引里有就直接用（快），没有就让 MCM/LS proxy 当场解析。
         let indexed = ContainerStore.containerIndexSnapshot(waitForBuild: false)
         for config in configs {
-            guard let path = indexed[config.bundleID], takePending(config.bundleID) != nil else { continue }
-            let lease = ContainerStore.retainAccess(path)
-            await consume(config, path: path, leases: [lease].compactMap { $0 })
+            guard takePending(config.bundleID) != nil else { continue }
+            if let path = indexed[config.bundleID] {
+                let lease = ContainerStore.retainAccess(path)
+                await consume(config, path: path, leases: [lease].compactMap { $0 })
+                continue
+            }
+            guard let resolution = resolveContainer(for: config) else {
+                log("collect: \(config.bundleID) unresolved — no index entry and MCM/LS returned nothing")
+                continue
+            }
+            await consume(config, path: resolution.path, leases: resolution.leases)
         }
 
         // 2. Group containers, access groups and absolute-path configs.
