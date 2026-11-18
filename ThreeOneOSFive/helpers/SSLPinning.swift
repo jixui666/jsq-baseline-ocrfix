@@ -26,10 +26,14 @@ final class PinnedSession {
     ///     | openssl x509 -pubkey -noout | openssl pkey -pubin -outform der \
     ///     | openssl dgst -sha256 -binary | base64
     static let leafPins: Set<String> = [
+        // api27.forgetcx.eu.cc（Let's Encrypt YE1，2027-02-09 到期）
         // 设备实测（2026-11-11，某 CF 节点）
         "IaGUvNa9OwAGCTxI3GJXMYn0EWeIYkY7NI5e1vAujUw=",
-        // openssl 从客户机取到（另一节点）
+        // 同一域名的另一节点（openssl 从客户机取到）
         "uo7EJVlktWwqz4SokIyf1oaYcdYOSGJN5+ncEfOobKI=",
+        // ios.haitunzf.com（Let's Encrypt YR1，2027-02-15 到期）
+        // openssl s_client -connect ios.haitunzf.com:443 -servername ios.haitunzf.com
+        "La0vc1UPF/KACfOZIBikw+x3rSxz3uf3bfLdKGpFxX0=",
     ]
 
     /// 中间 CA / Root 的公钥哈希。**默认不参与判定**，仅用于日志排障。
