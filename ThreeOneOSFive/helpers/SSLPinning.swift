@@ -49,7 +49,16 @@ final class PinnedSession {
     static let allowCAFallback = false
 
     /// 强制校验：白名单外的域名与不匹配的证书链一律拒绝连接（fail-closed）。
-    static let enabled = true
+    ///
+    /// 用 PINNING_DISABLED 编译出来的变体关掉它：换域名 / 换服务器 /
+    /// Let's Encrypt 证书续期都不需要重新打包客户端。系统仍会做标准 TLS 校验。
+    static let enabled: Bool = {
+        #if PINNING_DISABLED
+        return false
+        #else
+        return true
+        #endif
+    }()
 
     /// 运行时观察到的 SPKI 哈希（域名 -> base64），用于在没有 Xcode 时核对
     static var observed: [String: String] = [:]

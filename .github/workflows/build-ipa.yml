@@ -160,6 +160,34 @@ jobs:
           unzip -l JSQ-unsigned.ipa | head -n 14
 
       # ---------------------------------------------------------------- 诊断包
+      - name: Build .app (no pinning)
+        run: |
+          set -o pipefail
+          # 这一版关掉 SSL pin（PINNING_DISABLED）：换域名 / 换服务器 /
+          # Let's Encrypt 证书续期都不需要重新打包客户端。
+          xcodebuild \
+            -project ThreeOneOSFive.xcodeproj \
+            -scheme 3105 \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build-nopin \
+            SWIFT_ACTIVE_COMPILATION_CONDITIONS="INTEGRITY_DISABLED PINNING_DISABLED" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build-nopin.log
+
+      - name: Package no-pin IPA
+        run: |
+          set -e
+          APP="build-nopin/Build/Products/Release-iphoneos/JSQ.app"
+          [ -d "$APP" ] || { echo "ERROR: nopin build output missing"; tail -n 120 build-nopin.log; exit 1; }
+          python3 tools/integrity_pack.py --app "$APP" --profile enterprise
+          python3 tools/integrity_pack.py --app "$APP" --profile enterprise --verify
+          python3 tools/make_ipa.py --app "$APP" --out JSQ-unsigned-nopin.ipa
+          ls -l JSQ-unsigned-nopin.ipa
+
       - name: Build .app (diagnostic, never exits)
         run: |
           set -o pipefail
@@ -198,6 +226,7 @@ jobs:
             JSQ-unsigned.ipa
             JSQ-unsigned-strict.ipa
             JSQ-unsigned-safe.ipa
+            JSQ-unsigned-nopin.ipa
             JSQ.entitlements
           if-no-files-found: error
 
