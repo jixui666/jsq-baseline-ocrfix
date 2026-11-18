@@ -88,6 +88,7 @@ jobs:
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build \
+            SWIFT_ACTIVE_COMPILATION_CONDITIONS="INTEGRITY_DISABLED" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -169,10 +170,10 @@ jobs:
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build-safe \
+            SWIFT_ACTIVE_COMPILATION_CONDITIONS="INTEGRITY_DISABLED" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            SWIFT_ACTIVE_COMPILATION_CONDITIONS='INTEGRITY_SAFE_MODE' \
             build 2>&1 | tee build-safe.log
 
       - name: Package diagnostic IPA (safe mode)

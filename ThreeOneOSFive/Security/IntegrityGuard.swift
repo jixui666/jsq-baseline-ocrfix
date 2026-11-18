@@ -34,6 +34,13 @@ enum IntegrityGuard {
         #if DEBUG
         return
         #else
+        #if INTEGRITY_DISABLED
+        // 构建期彻底关掉：不嵌清单、不比对 __TEXT / 文件哈希、不反调试。
+        // 用于需要出包后自己替换 links.txt / shell.txt / 图标的场景
+        // （替换后端内文件哈希必然变化，正常版本会 _exit(0)）。
+        note("integrity check disabled at build time", fatal: false)
+        return
+        #endif
         denyAttach()
 
         var issues: [String] = []
