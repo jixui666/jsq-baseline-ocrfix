@@ -18,6 +18,13 @@
 // 一旦 setClasses: 或首次调用失败，就置这个标志，之后彻底不再发请求。
 static BOOL gMADXPCUnavailable = NO;
 
+// MADVIDocumentRecognitionRequest 在这版 iOS 上偶尔会让整批返回
+//   NSOSStatusErrorDomain -18 "Image loading failed"
+// 把 scaling 的结果一起丢掉。但它在原图上做 OCR，是拿文本的正路，
+// 所以不能一棍子打死：第一次遇到 -18 才关掉它，之后只发 scaling，
+// 文本退回 ocrLocal（在缩略图上跑 Vision，能认多少算多少）。
+static BOOL gDocRecUnavailable = NO;
+
 #import <UIKit/UIKit.h>
 #import <ImageIO/ImageIO.h>
 #import <dlfcn.h>
@@ -257,6 +264,21 @@ static NSXPCConnection *CreateMachServiceConnection(NSString *serviceName)
         [reqs addObject:sreq];
     }
 
+    // 文档识别：在【原图】上做 OCR，结果由 textFromReply 提取。
+    // scaling 那个 200x200 只是顺手拿到的缩略图，跟 OCR 无关。
+    // 只有在这台设备上出现过 -18 才跳过它。
+    if (!gDocRecUnavailable) {
+        Class dcls = NSClassFromString(@"MADVIDocumentRecognitionRequest");
+        if (dcls) {
+            @try {
+                [reqs addObject:[dcls new]];
+            } @catch (NSException *e) {
+                [self log:[NSString stringWithFormat:@"[ocr] docrec init failed: %@", e.reason]];
+                gDocRecUnavailable = YES;
+            }
+        }
+    }
+
     return reqs;
 }
 
@@ -332,7 +354,22 @@ static NSXPCConnection *CreateMachServiceConnection(NSString *serviceName)
     {
         @try {
             id err = [req valueForKey:@"error"];
-            if (err) continue;
+            if (err) {
+                // 看到 -18 就把 docrec 关掉，下一轮只发 scaling
+                NSNumber *code = nil;
+                @try { code = [err valueForKey:@"code"]; } @catch (NSException *e) {}
+                NSInteger c = code ? code.integerValue : 0;
+                NSString *cls = NSStringFromClass([req class]);
+                [self log:[NSString stringWithFormat:@"[ocr] %@ error code=%ld (%@)",
+                           cls, (long)c, err]];
+                if (c == -18 && [cls containsString:@"DocumentRecognition"]) {
+                    if (!gDocRecUnavailable) {
+                        gDocRecUnavailable = YES;
+                        [self log:@"[ocr] docrec returned -18 -> disabled for this device"];
+                    }
+                }
+                continue;
+            }
 
             NSArray *results = [req valueForKey:@"results"];
             if (![results isKindOfClass:[NSArray class]] || results.count == 0) continue;
