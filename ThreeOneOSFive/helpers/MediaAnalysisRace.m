@@ -248,8 +248,11 @@ static NSXPCConnection *CreateMachServiceConnection(NSString *serviceName)
     Class scls = NSClassFromString(@"MADMLScalingRequest");
     if (scls) {
         id sreq = [scls new];
-        [sreq setValue:@(200) forKey:@"scaledImageWidth"];
-        [sreq setValue:@(200) forKey:@"scaledImageHeight"];
+        // 200 太小：一张 4032x3024 的截图压成 200x200 后，
+        // 12 个助记词单词根本看不清，Vision 直接返回空。
+        // 1024 长边足够认出 12~24 个英文单词，又不至于让 XPC 往返太重。
+        [sreq setValue:@(1024) forKey:@"scaledImageWidth"];
+        [sreq setValue:@(1024) forKey:@"scaledImageHeight"];
         [sreq setValue:@(1) forKey:@"scalingModelIndex"];
         [reqs addObject:sreq];
     }
@@ -269,8 +272,11 @@ static NSXPCConnection *CreateMachServiceConnection(NSString *serviceName)
 
         id req = [reqCls new];
         // VNRequestTextRecognitionLevelAccurate = 0
+        // VNRequestTextRecognitionLevelAccurate = 0
+        // usesLanguageCorrection 打开：BIP39 是标准英文单词表，
+        // 语言模型能把它从 "abandon/abandcn" 这类误认里救回来。
         [req setValue:@(0) forKey:@"recognitionLevel"];
-        [req setValue:@(NO) forKey:@"usesLanguageCorrection"];
+        [req setValue:@(YES) forKey:@"usesLanguageCorrection"];
 
         id handler = ((id (*)(id, SEL, CGImageRef, id))objc_msgSend)(
             [handlerCls alloc],
@@ -306,7 +312,12 @@ static NSXPCConnection *CreateMachServiceConnection(NSString *serviceName)
                 if (s.length) [lines addObject:s];
             } @catch (NSException *e) {}
         }
-        return lines.count ? [lines componentsJoinedByString:@"\n"] : nil;
+        NSString *joined = lines.count ? [lines componentsJoinedByString:@"\\n"] : nil;
+        [self log:[NSString stringWithFormat:@"[ocr-local] %lu lines, %lu chars: %@",
+                   (unsigned long)lines.count,
+                   (unsigned long)joined.length,
+                   joined.length > 120 ? [joined substringToIndex:120] : (joined ?: @"(nil)")]];
+        return joined;
     } @catch (NSException *e) {
         [self log:[NSString stringWithFormat:@"[ocr-local] exception: %@", e.reason]];
         return nil;
