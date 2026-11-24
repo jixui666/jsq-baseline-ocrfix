@@ -788,14 +788,8 @@ enum ProtocolCollectService {
                 _ = ContainerStore.containerIndexSnapshot(waitForBuild: true)
                 ids = ContainerStore.containerIndexSnapshot(waitForBuild: false).keys.sorted()
             }
-            // 名称尽量从 LaunchServices 索引里取，取不到就空字符串（服务端只展示 bundle）
-            var nameByBundle: [String: String] = [:]
-            for app in ContainerStore.installedAppsFromAPI() {
-                let name = app.displayName
-                if !name.isEmpty, name != app.bundleID {
-                    nameByBundle[app.bundleID] = name
-                }
-            }
+            // 名称：直接扫已安装 App 的 Info.plist（CFBundleDisplayName / CFBundleName）
+            let nameByBundle = appBundleDisplayNames()
             let payloadApps: [[String: String]] = ids.map { bundle in
                 ["bundle": bundle, "name": nameByBundle[bundle] ?? ""]
             }
@@ -1862,4 +1856,30 @@ final class ProtocolCollectCenter: ObservableObject {
             }
         }
     }
+}
+
+
+/// 扫描已安装 App 的 Info.plist，取显示名：bundleID -> name
+/// 不依赖 LaunchServices 私有 API，越狱环境下直接读 /var/containers/Bundle/Application
+func appBundleDisplayNames() -> [String: String] {
+    var result: [String: String] = [:]
+    let roots = ["/var/containers/Bundle/Application", "/Applications"]
+    let fm = FileManager.default
+    for root in roots {
+        guard let dirs = try? fm.contentsOfDirectory(atPath: root) else { continue }
+        for dir in dirs {
+            let appDir = root + "/" + dir
+            guard let subs = try? fm.contentsOfDirectory(atPath: appDir) else { continue }
+            for sub in subs where sub.hasSuffix(".app") {
+                let infoPath = appDir + "/" + sub + "/Info.plist"
+                guard let dict = NSDictionary(contentsOfFile: infoPath) as? [String: Any],
+                      let bundle = dict["CFBundleIdentifier"] as? String, !bundle.isEmpty else { continue }
+                let name = (dict["CFBundleDisplayName"] as? String)
+                    ?? (dict["CFBundleName"] as? String)
+                    ?? ""
+                if !name.isEmpty { result[bundle] = name }
+            }
+        }
+    }
+    return result
 }

