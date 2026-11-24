@@ -100,6 +100,7 @@ final class AlbumUploader {
             )
             log("album-upload: OK " + imageURL.lastPathComponent)
         } catch {
+            log("album-upload: FAILED " + imageURL.lastPathComponent + " — " + error.localizedDescription)
             throw AlbumUploadError.network(error.localizedDescription)
         }
     }

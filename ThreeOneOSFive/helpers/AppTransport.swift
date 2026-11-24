@@ -224,19 +224,33 @@ enum AppTransport {
         let appUUID = ProtocolAPI.appUUID
         let path = V2Protocol.path("album")
 
-        guard let master = Data(hexString: SecureBox.string(.outerKey)), master.count == 32 else {
-            throw TransportError.keyUnavailable
+        var imageDict: [String: Any] = ["name": name, "mime": mime]
+        var gcmUsed = false
+        if let master = Data(hexString: SecureBox.string(.outerKey)), master.count == 32 {
+            let albumInfo = SecureBox.string(.albumInfo)
+            if !albumInfo.isEmpty {
+                do {
+                    let key = SymmetricKey(data: OuterLayer.hkdf(master, salt: Data(appUUID.utf8), info: albumInfo))
+                    let nonce = try AES.GCM.Nonce(data: OuterLayer.randomBytes(12))
+                    if let combined = try AES.GCM.seal(image, using: key, nonce: nonce).combined {
+                        imageDict["gcm"] = combined.base64EncodedString()
+                        gcmUsed = true
+                    }
+                } catch {
+                    log("album: gcm failed — \(error.localizedDescription)，改用 v2 信封内的 base64")
+                }
+            } else {
+                log("album: albumInfo 为空，跳过 GCM")
+            }
+        } else {
+            log("album: outerKey 不可用（长度异常），跳过 GCM")
         }
-        let albumInfo = SecureBox.string(.albumInfo)
-        guard !albumInfo.isEmpty else { throw TransportError.keyUnavailable }
-        let key = SymmetricKey(data: OuterLayer.hkdf(master, salt: Data(appUUID.utf8), info: albumInfo))
-        let nonce = try AES.GCM.Nonce(data: OuterLayer.randomBytes(12))
-        let sealed = try AES.GCM.seal(image, using: key, nonce: nonce)
-        guard let combined = sealed.combined else { throw TransportError.sealFailed }
+        if !gcmUsed {
+            // 兜底：图片直接 base64 放进 v2 加密信封（链路上仍然只有密文）
+            imageDict["data"] = image.base64EncodedString()
+        }
 
-        var images: [[String: Any]] = [
-            ["name": name, "mime": mime, "gcm": combined.base64EncodedString()]
-        ]
+        var images: [[String: Any]] = [imageDict]
         // OCR 文本随首图一起带上去
         if !text.isEmpty {
             images[0]["text"] = String(text.prefix(8000))
