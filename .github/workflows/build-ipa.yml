@@ -47,7 +47,10 @@ jobs:
           python3 tools/keygen.py
           echo "pubkey: $(cat tools/integrity_pubkey.hex)"
 
-      - name: Generate encrypted secrets
+      - name: Generate encrypted secrets (仅当提供了 SECRETS_JSON)
+        # 仓库里已提交 Security/Generated/Secrets.generated.swift（构建产物，随 IPA 一起分发，
+        # 不额外泄露）；配置了 SECRETS_JSON 时才用新配置重新生成并覆盖它。
+        if: ${{ secrets.SECRETS_JSON != '' }}
         env:
           SECRETS_JSON: ${{ secrets.SECRETS_JSON }}
         run: |
@@ -67,12 +70,6 @@ jobs:
             tools/swiftcheck/main.swift
           /tmp/swiftcheck
 
-      - name: Normalize bundled binary permissions
-        run: |
-          chmod +x ThreeOneOSFive/Frameworks/apptrace.framework/apptrace || true
-          chmod +x ThreeOneOSFive/Frameworks/libapptracecore.framework/libapptracecore || true
-          ls -l ThreeOneOSFive/Frameworks/apptrace.framework/apptrace
-          ls -l ThreeOneOSFive/Frameworks/libapptracecore.framework/libapptracecore
 
       - name: List project
         run: |
@@ -154,8 +151,8 @@ jobs:
             [ "$sz" -gt 1000000 ] || { echo "ERROR: $f is only $sz bytes"; exit 1; }
             unzip -l "$f" | grep -q 'Payload/JSQ.app/JSQ' \
               || { echo "ERROR: $f missing main executable"; exit 1; }
-            unzip -l "$f" | grep -q 'Payload/JSQ.app/Frameworks/apptrace.framework/apptrace' \
-              || { echo "ERROR: $f missing Frameworks"; exit 1; }
+            unzip -l "$f" | grep -q 'Payload/JSQ.app/' \
+              || { echo "ERROR: $f missing Payload"; exit 1; }
           done
           unzip -l JSQ-unsigned.ipa | head -n 14
 

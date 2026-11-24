@@ -86,11 +86,8 @@
 		3105A233 /* ContainerStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105A104; };
 		3105A234 /* AppDataBrowserView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105A105; };
 		3105A211 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3105A031; };
-		3105A212 /* Frameworks in Resources */ = {isa = PBXBuildFile; fileRef = 3105A130; };
 		3105A242 /* LegacyTraceGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105A114; };
 		3105A243 /* LinksURLProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105A115; };
-		3105A244 /* links.txt in Resources */ = {isa = PBXBuildFile; fileRef = 3105A116; };
-		3105A245 /* shell.txt in Resources */ = {isa = PBXBuildFile; fileRef = 3105A117; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -193,9 +190,6 @@
 		3105L105 /* RepositoryPresentationSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryPresentationSupport.swift; sourceTree = "<group>"; };
 		3105A114 /* LegacyTraceGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LegacyTraceGate.swift; sourceTree = "<group>"; };
 		3105A115 /* LinksURLProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinksURLProtocol.swift; sourceTree = "<group>"; };
-		3105A116 /* links.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = links.txt; sourceTree = "<group>"; };
-		3105A117 /* shell.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = shell.txt; sourceTree = "<group>"; };
-		3105A130 /* Frameworks */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Frameworks; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -232,8 +226,6 @@
 			children = (
 				3105A050 /* ThreeOneOSFive-Bridging-Header.h */,
 				3105A060 /* Info.plist */,
-				3105A116 /* links.txt */,
-				3105A117 /* shell.txt */,
 				3105A020 /* App.swift */,
 				3105A021 /* ContentView.swift */,
 				3105A403 /* exploit */,
@@ -242,7 +234,6 @@
 				3105A405 /* helpers */,
 				3105A406 /* kexploit */,
 				3105A031 /* Assets.xcassets */,
-				3105A130 /* Frameworks */,
 			);
 			path = ThreeOneOSFive;
 			sourceTree = "<group>";
@@ -429,9 +420,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				3105A211,
-				3105A212,
-				3105A244,
-				3105A245,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

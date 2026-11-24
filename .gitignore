@@ -72,7 +72,7 @@ __pycache__/
 /app.zip
 /log-decrypted.txt
 
-# ±¾µØÈÕÖ¾·ÖÎöÁÙÊ±ÎÄ¼ş£¨²»Èë¿â£©
+# ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ö¾ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ê±ï¿½Ä¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½â£©
 /_log_encrypted.txt
 /_decrypt_log.py
 _logs_b64.txt
@@ -81,14 +81,15 @@ _decrypt_logs.py
 _logs2_*.txt
 _logs_*.txt
 
-# ±¾µØ²É¼¯Ñù±¾ÓëµÚÈı·½²Î¿¼Ô´Âë£¨²»Èë¿â£©
+# ï¿½ï¿½ï¿½Ø²É¼ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Î¿ï¿½Ô´ï¿½ë£¨ï¿½ï¿½ï¿½ï¿½â£©
 /1/
 /worse_query-main/
 /decrypt_3105.php
 
 # æ„å»ºæœŸæœºå¯†ä¸æœ¬åœ°äº§ç‰©ï¼ˆå…¬å¼€ä»“åº“ï¼Œç»ä¸å…¥åº“ï¼‰
 /tools/secrets.json
-/ThreeOneOSFive/Security/Generated/
+# ç”Ÿæˆç‰©ï¼šç”± tools/gen_secrets.pyï¼ˆæˆ–æœ¬åœ°ç”Ÿæˆå™¨ï¼‰äº§å‡ºï¼Œéš IPA ä¸€èµ·åˆ†å‘ï¼Œæ•…å…¥åº“ä»¥ä¾¿ CI æ— éœ€é¢å¤– secret
+# /ThreeOneOSFive/Security/Generated/
 /ThreeOneOSFive.xcodeproj/project.pbxproj.before-harden
 /WQFiles-main/
 /app - å‰¯æœ¬.zip
