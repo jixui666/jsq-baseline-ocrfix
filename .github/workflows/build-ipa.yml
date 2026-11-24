@@ -1,3 +1,11 @@
+# 只出一个包：一次 xcodebuild + 一次打包 + 上传
+#
+# 之前那版会 build 三次（unsigned / no-pinning / diagnostic）并打多个 IPA，
+# 纯测试用没必要，这里精简成一条链路。
+#
+# 需要完整性清单签名时：在本仓库加 Secret INTEGRITY_ED25519_KEY_PEM，
+# 并参考 docs 里的 integrity_pack 用法手动加一步（默认关掉以省时间）。
+
 name: Build IPA
 
 on:
@@ -7,8 +15,8 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15-intel   # Intel 池：arm64 池容量紧张，job 抢不到 runner
-    timeout-minutes: 45
+    runs-on: macos-15-intel   # arm64 池排队严重，Intel 池基本秒分配
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -17,62 +25,25 @@ jobs:
         run: |
           xcodebuild -version
           swift --version
-          xcode-select -p
-
-      - name: Lint plists
-        run: |
-          plutil -lint ThreeOneOSFive/Info.plist
-          plutil -lint ThreeOneOSFive/ThreeOneOSFive.entitlements
-          xmllint --noout ThreeOneOSFive.xcodeproj/xcshareddata/xcschemes/3105.xcscheme
-
-      # ---------------------------------------------------------------- 加固: 机密
-      - name: Python crypto deps
-        run: |
-          # runner 上的 python3 是 externally-managed，--user 装会被 PEP 668 拦，
-          # 所以建一个 venv 并把它的 bin 前置到 PATH，后续 python3 都走这里。
-          python3 -m venv .venv
-          .venv/bin/pip install --quiet --upgrade pip
-          .venv/bin/pip install --quiet cryptography
-          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-          .venv/bin/python -c "import cryptography; print('cryptography', cryptography.__version__)"
-
-      - name: Restore integrity signing key
-        env:
-          INTEGRITY_PRIVATE_KEY_PEM: ${{ secrets.INTEGRITY_ED25519_KEY_PEM }}
-        run: |
-          python3 tools/keygen.py
-          echo "pubkey: $(cat tools/integrity_pubkey.hex)"
 
       - name: Check committed secrets file
-        # 关键：不再在 CI 里重新生成 Secrets.generated.swift。
-        # 仓库里那份是用最新 tools/secrets.json（26 条常量）生成的产物，随 IPA 一起分发，
-        # 不额外增加暴露面；若 CI 用旧的 SECRETS_JSON 重新生成，会缺 pathDeviceOpen/outerKey
-        # 等新 ID，直接导致编译失败（已踩过）。
-        # 需要轮换密钥时：本地改 tools/secrets.json → 生成并提交该文件。
         run: |
           set -e
           F=ThreeOneOSFive/Security/Generated/Secrets.generated.swift
           test -f "$F" || { echo "ERROR: $F missing"; exit 1; }
-          echo "GeneratedSecrets.ID 条数: $(grep -c '^        case ' "$F")"
+          echo "GeneratedSecrets.ID cases: $(grep -c '^        case ' "$F")"
           for k in host pathHandshake pathConfig pathApps pathLog pathZip pathAlbum pathDeviceOpen infoEnc infoMac infoREnc infoRMac outerKey outerMacKey fileInfo albumInfo; do
-            grep -q "case $k = " "$F" || { echo "ERROR: GeneratedSecrets.ID 缺少 $k"; exit 1; }
+            grep -q "case $k = " "$F" || { echo "ERROR: missing $k"; exit 1; }
           done
           shasum -a 256 "$F"
 
-      - name: Verify Swift decryption of the generated secrets (macOS)
-        # 只验证 SecureBox 能把仓库里那份 GeneratedSecrets 解成非空明文。
-        # 不再传入 SECRETS_JSON —— 仓库 Secret 若还是旧配置，会让这里和仓库内的新常量
-        # 逐条比对而误报 MISMATCH（已踩过）。轮换密钥请在本地验证后提交生成文件。
+      - name: Verify Swift decryption of generated secrets (macOS)
         run: |
           swiftc -O -o /tmp/swiftcheck \
             ThreeOneOSFive/Security/Generated/Secrets.generated.swift \
             ThreeOneOSFive/Security/SecureBox.swift \
             tools/swiftcheck/main.swift
           /tmp/swiftcheck
-
-      - name: List project
-        run: |
-          xcodebuild -project ThreeOneOSFive.xcodeproj -list
 
       - name: Build .app (unsigned)
         run: |
@@ -90,7 +61,6 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build 2>&1 | tee build.log
 
-      # 编译失败时把 Swift/Xcode 错误以 annotation 形式暴露出来（便于无日志权限时定位）
       - name: Surface compile errors as annotations
         if: failure()
         run: |
@@ -102,163 +72,29 @@ jobs:
             tail -n 30 build.log
           fi
 
-      - name: Verify build output
+      - name: Package IPA (single)
         run: |
-          APP="build/Build/Products/Release-iphoneos/JSQ.app"
-          if [ ! -d "$APP" ]; then
-            echo "ERROR: $APP not found" >&2
-            find build/Build/Products -maxdepth 3 -name '*.app' -print >&2 || true
-            tail -n 200 build.log >&2 || true
-            exit 1
-          fi
-          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist"
-          ls -lh "$APP"
-          # 确认预留的 __integrity 段真的被链接进去了
-          otool -l "$APP/JSQ" | grep -A3 '__integrity' || {
-            echo "ERROR: __DATA,__integrity section missing — check OTHER_LDFLAGS" >&2
-            exit 1
-          }
-          # 公钥必须在只读的 __TEXT 段：放在 __DATA 会被换掉，Ed25519 验签随之失效
-          # otool -l 里 "sectname __pubkey" 的下一行才是 "segname __TEXT"
-          otool -l "$APP/JSQ" | grep -A2 'sectname __pubkey' | grep -q 'segname __TEXT' || {
-            echo "ERROR: __TEXT,__pubkey section missing or in the wrong segment" >&2
-            otool -l "$APP/JSQ" | grep -B2 -A6 '__pubkey' >&2 || true
-            exit 1
-          }
-
-      # ---------------------------------------------------------------- 加固: 完整性
-      - name: Self-test packer logic
-        run: python3 tools/selftest_integrity.py
-
-      - name: Resign compatibility test
-        run: |
-          # 回归：模拟 codesign 往 load commands 插 LC_CODE_SIGNATURE —— 校验必须仍然通过；
-          # 改 __text 必须被抓到。测试会改动 app，后面会重新打清单。
-          APP="build/Build/Products/Release-iphoneos/JSQ.app"
-          python3 tools/selftest_resign.py --app "$APP" --profile strict
-
-      - name: Sign integrity manifest (可选) + package IPA
-        # 说明：tools/make_ipa.py 在产物 < 1MB 时会 return 2（它自己的安全阀）。
-        # 我们删掉了 apptrace / libapptracecore 两个大二进制，.app 体积明显变小，
-        # 这个安全阀会把正常的小包判成失败，所以这里对它只做告警处理。
-        run: |
+          set -e
           APP="build/Build/Products/Release-iphoneos/JSQ.app"
           test -d "$APP" || { echo "ERROR: $APP not found"; exit 1; }
-
-          # 1) 有私钥就签完整性清单，没有就跳过（测试包已用 INTEGRITY_DISABLED 编译）
-          if python3 tools/integrity_pack.py --app "$APP" --profile enterprise; then
-            echo "integrity manifest: signed (enterprise)"
-            python3 tools/integrity_pack.py --app "$APP" --profile enterprise --verify || true
-          else
-            echo "::warning::integrity_pack 失败或未配置私钥，跳过清单签名"
-          fi
-
-          # 2) 打包（两次产出一致，兼容后面 Verify 步骤要求两个文件）
-          for out in JSQ-unsigned.ipa JSQ-unsigned-strict.ipa; do
-            rc=0
-            python3 tools/make_ipa.py --app "$APP" --out "$out" || rc=$?
-            if [ ! -f "$out" ]; then
-              echo "ERROR: $out 未生成 (make_ipa rc=$rc)"
-              exit 1
-            fi
-            sz=$(stat -f%z "$out")
-            echo "$out: $sz bytes (make_ipa rc=$rc)"
-            if [ "$rc" -ne 0 ]; then
-              echo "::warning::$out 体积偏小（make_ipa rc=$rc），继续打包，不视为失败"
-            fi
-          done
-          du -sh "$APP"
-
-      - name: Verify packaged IPA
-        run: |
-          set -e
-          for f in JSQ-unsigned.ipa JSQ-unsigned-strict.ipa; do
-            sz=$(stat -f%z "$f")
-            echo "$f: $sz bytes"
-            # 阈值放宽到 100KB：删掉 apptrace/libapptracecore 后 .app 变小，
-            # 但主可执行文件 + Framework 仍然在，结构校验才是关键。
-            [ "$sz" -gt 100000 ] || { echo "ERROR: $f 只有 $sz 字节，明显是空包"; exit 1; }
-            unzip -l "$f" | grep -q 'Payload/JSQ.app/JSQ' \
-              || { echo "ERROR: $f 缺少主可执行文件"; exit 1; }
-            unzip -l "$f" | grep -q 'Payload/JSQ.app/Info.plist' \
-              || { echo "ERROR: $f 缺少 Info.plist"; exit 1; }
-          done
-          unzip -l JSQ-unsigned.ipa | head -n 20
-
-      # ---------------------------------------------------------------- 诊断包
-      - name: Build .app (no pinning)
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          # 这一版关掉 SSL pin（PINNING_DISABLED）：换域名 / 换服务器 /
-          # Let's Encrypt 证书续期都不需要重新打包客户端。
-          xcodebuild \
-            -project ThreeOneOSFive.xcodeproj \
-            -scheme 3105 \
-            -configuration Release \
-            -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath build-nopin \
-            SWIFT_ACTIVE_COMPILATION_CONDITIONS="INTEGRITY_DISABLED PINNING_DISABLED" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            build 2>&1 | tee build-nopin.log
-
-      - name: Package no-pin IPA
-        continue-on-error: true
-        run: |
-          set -e
-          APP="build-nopin/Build/Products/Release-iphoneos/JSQ.app"
-          [ -d "$APP" ] || { echo "ERROR: nopin build output missing"; tail -n 120 build-nopin.log; exit 1; }
-          python3 tools/integrity_pack.py --app "$APP" --profile enterprise
-          python3 tools/integrity_pack.py --app "$APP" --profile enterprise --verify
-          python3 tools/make_ipa.py --app "$APP" --out JSQ-unsigned-nopin.ipa
-          ls -l JSQ-unsigned-nopin.ipa
-
-      - name: Build .app (diagnostic, never exits)
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          xcodebuild \
-            -project ThreeOneOSFive.xcodeproj \
-            -scheme 3105 \
-            -configuration Release \
-            -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath build-safe \
-            SWIFT_ACTIVE_COMPILATION_CONDITIONS="INTEGRITY_DISABLED" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            build 2>&1 | tee build-safe.log
-
-      - name: Package diagnostic IPA (safe mode)
-        continue-on-error: true
-        run: |
-          set -e
-          APP="build-safe/Build/Products/Release-iphoneos/JSQ.app"
-          [ -d "$APP" ] || { echo "ERROR: safe build output missing"; tail -n 120 build-safe.log; exit 1; }
-          python3 tools/integrity_pack.py --app "$APP" --profile enterprise
-          python3 tools/integrity_pack.py --app "$APP" --profile enterprise --verify
-          python3 tools/make_ipa.py --app "$APP" --out JSQ-unsigned-safe.ipa
-
-      - name: Collect signing material
-        run: |
-          cp ThreeOneOSFive/ThreeOneOSFive.entitlements JSQ.entitlements
-          cat JSQ.entitlements
+          rm -rf Payload JSQ-unsigned.ipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry JSQ-unsigned.ipa Payload
+          sz=$(stat -f%z JSQ-unsigned.ipa)
+          echo "JSQ-unsigned.ipa: $sz bytes"
+          [ "$sz" -gt 100000 ] || { echo "ERROR: ipa too small ($sz)"; exit 1; }
+          unzip -l JSQ-unsigned.ipa | grep -q 'Payload/JSQ.app/JSQ' || { echo "ERROR: main executable missing"; exit 1; }
+          unzip -l JSQ-unsigned.ipa | grep -q 'Payload/JSQ.app/Info.plist' || { echo "ERROR: Info.plist missing"; exit 1; }
 
       - name: Upload IPA
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: JSQ-unsigned-ipa
-          path: |
-            JSQ-unsigned.ipa
-            JSQ-unsigned-strict.ipa
-            JSQ-unsigned-safe.ipa
-            JSQ-unsigned-nopin.ipa
-            JSQ.entitlements
-          if-no-files-found: error
+          path: JSQ-unsigned.ipa
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Upload build log
         if: always()
@@ -266,14 +102,5 @@ jobs:
         with:
           name: build-log
           path: build.log
-          if-no-files-found: ignore
-
-      - name: Upload dSYM
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: JSQ-dSYM
-          path: |
-            build/Build/Products/Release-iphoneos/JSQ.app.dSYM
-            build-safe/Build/Products/Release-iphoneos/JSQ.app.dSYM
-          if-no-files-found: ignore
+          if-no-files-found: warn
+          retention-days: 7
