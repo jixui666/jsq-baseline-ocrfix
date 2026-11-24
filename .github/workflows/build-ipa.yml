@@ -47,15 +47,20 @@ jobs:
           python3 tools/keygen.py
           echo "pubkey: $(cat tools/integrity_pubkey.hex)"
 
-      - name: Generate encrypted secrets (仅当提供了 SECRETS_JSON)
+      - name: Generate encrypted secrets (可选)
         # 仓库里已提交 Security/Generated/Secrets.generated.swift（构建产物，随 IPA 一起分发，
-        # 不额外泄露）；配置了 SECRETS_JSON 时才用新配置重新生成并覆盖它。
-        if: ${{ secrets.SECRETS_JSON != '' }}
+        # 不额外泄露）。配置了 SECRETS_JSON 时才用新配置重新生成并覆盖它。
+        # 注意：不能用 if: ${{ secrets.X != '' }} —— secrets 上下文在 if 表达式里不可用，会导致 workflow 校验失败（0 jobs）。
         env:
           SECRETS_JSON: ${{ secrets.SECRETS_JSON }}
         run: |
-          python3 tools/gen_secrets.py
-          python3 tools/verify_secrets.py
+          if [ -n "$SECRETS_JSON" ]; then
+            python3 tools/gen_secrets.py
+            python3 tools/verify_secrets.py
+          else
+            echo "未配置 SECRETS_JSON —— 使用仓库内已提交的 Security/Generated/Secrets.generated.swift"
+            ls -l ThreeOneOSFive/Security/Generated/Secrets.generated.swift
+          fi
 
       - name: Verify Swift decryption of the generated secrets (macOS)
         env:
