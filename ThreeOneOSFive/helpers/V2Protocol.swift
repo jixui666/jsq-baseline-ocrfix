@@ -53,6 +53,7 @@ enum V2Protocol {
         case "zip": return SecureBox.string(.pathZip)
         case "album": return SecureBox.string(.pathAlbum)
         case "handshake": return SecureBox.string(.pathHandshake)
+        case "deviceOpen": return SecureBox.string(.pathDeviceOpen)
         default: return key
         }
     }
@@ -64,19 +65,19 @@ enum V2Protocol {
 
     // MARK: - 公钥片段（4 × 8 字节，enc[i] = raw[i] ^ mask ^ (i*7+0x31)）
 
-    private static let f0: [UInt8] = [0x1f, 0x8e, 0x70, 0x79, 0xc8, 0x6e, 0x9c, 0xbc]
-    private static let f1: [UInt8] = [0x0c, 0xcc, 0x84, 0x49, 0x69, 0xda, 0x0f, 0x2f]
-    private static let f2: [UInt8] = [0xf8, 0x86, 0x2d, 0x68, 0x77, 0xc1, 0x56, 0x1f]
-    private static let f3: [UInt8] = [0x2b, 0x20, 0xc6, 0x96, 0x26, 0x76, 0xce, 0x94]
+    private static let f0: [UInt8] = [0xe5, 0x01, 0x6d, 0xa8, 0xb8, 0x9a, 0xd7, 0x31]
+    private static let f1: [UInt8] = [0xcb, 0x35, 0x09, 0x35, 0xdf, 0x2e, 0xe1, 0xe7]
+    private static let f2: [UInt8] = [0x01, 0x37, 0x5a, 0x04, 0x8f, 0x82, 0x95, 0xb2]
+    private static let f3: [UInt8] = [0x75, 0xd6, 0xe6, 0x15, 0xb2, 0x57, 0x9a, 0x7f]
 
-    private static let m0: UInt8 = 0x5a
-    private static let m1: UInt8 = 0xc3
-    private static let m2: UInt8 = 0x2f
-    private static let m3: UInt8 = 0x91
+    private static let m0: UInt8 = 0x64
+    private static let m1: UInt8 = 0xf4
+    private static let m2: UInt8 = 0x85
+    private static let m3: UInt8 = 0x02
 
     /// sha256(pubkey)[0..4]，拆两段各自异或
-    private static let fpA: [UInt8] = [0x45, 0xa6]
-    private static let fpB: [UInt8] = [0x3f, 0x1d]
+    private static let fpA: [UInt8] = [0x15, 0xce]
+    private static let fpB: [UInt8] = [0xef, 0xfc]
 
     private static func decode(_ src: [UInt8], _ mask: UInt8) -> [UInt8] {
         var out = [UInt8](repeating: 0, count: src.count)
@@ -107,7 +108,7 @@ enum V2Protocol {
         var request = URLRequest(url: baseURL.appendingPathComponent(path("handshake")))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = Data("{}".utf8)
+        request.httpBody = try? JSONSerialization.data(withJSONObject: OuterLayer.seal([String: Any]()))
         request.timeoutInterval = timeout
         // iOS 启动瞬间网络栈可能未就绪，重试几次
         for attempt in 0..<4 {
@@ -126,7 +127,8 @@ enum V2Protocol {
     private static func trustOnce(_ request: URLRequest) async throws -> Bool {
         let (data, response) = try await PinnedSession.shared.session.data(for: request)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-              let env = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let env = try OuterLayer.open(data),
+
               (env["code"] as? Int) == 0,
               let inner = env["data"] as? [String: Any],
               let pub = inner["serverPub"] as? String else {

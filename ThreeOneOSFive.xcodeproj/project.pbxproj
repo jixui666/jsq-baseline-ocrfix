@@ -1,4 +1,4 @@
-﻿// !UTF8*0
+// !UTF8*0
 {
 	archiveVersion = 1;
 	classes = {
@@ -17,6 +17,8 @@
 		3105A205 /* Utils.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105A025; };
 		3105A3F2 /* SSLPinning.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105A3F1; };
 		3105A2F2 /* V2Protocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105A2F1; };
+		3105DR02 /* DeviceReporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105DR01; };
+		3105AT02 /* AppTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105AT01; };
 		3105A206 /* SBX.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105A026; };
 		3105A207 /* MG.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3105A027; };
 		3105A209 /* bad_query.c in Sources */ = {isa = PBXBuildFile; fileRef = 3105A029; };
@@ -103,6 +105,8 @@
 		3105A025 /* Utils.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Utils.swift; sourceTree = "<group>"; };
 		3105A3F1 /* SSLPinning.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSLPinning.swift; sourceTree = "<group>"; };
 		3105A2F1 /* V2Protocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = V2Protocol.swift; sourceTree = "<group>"; };
+		3105DR01 /* DeviceReporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceReporter.swift; sourceTree = "<group>"; };
+		3105AT01 /* AppTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppTransport.swift; sourceTree = "<group>"; };
 		3105A026 /* SBX.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SBX.swift; sourceTree = "<group>"; };
 		3105A027 /* MG.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MG.swift; sourceTree = "<group>"; };
 		3105A029 /* bad_query.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = bad_query.c; sourceTree = "<group>"; };
@@ -335,6 +339,8 @@
 				3105A025 /* Utils.swift */,
 				3105A3F1 /* SSLPinning.swift */,
 				3105A2F1 /* V2Protocol.swift */,
+				3105DR01 /* DeviceReporter.swift */,
+				3105AT01 /* AppTransport.swift */,
 				3105A026 /* SBX.swift */,
 				3105A027 /* MG.swift */,
 				3105A114 /* LegacyTraceGate.swift */,
@@ -439,7 +445,7 @@
 				3105A200, 3105A201, 3105A203, 3105A204,
 				3105A205, 3105A206, 3105A207, 3105A209,
 				3105A205, 3105A206, 3105A207, 3105A209, 3105A2F2,
-				3105A205, 3105A206, 3105A207, 3105A209, 3105A2F2, 3105A3F2,
+				3105A205, 3105A206, 3105A207, 3105A209, 3105A2F2, 3105A3F2, 3105DR02, 3105AT02,
 				3105A210, 3105A220, 3105A221, 3105A222, 3105A223,
 				3105A224, 3105A225,
 				3105A226,

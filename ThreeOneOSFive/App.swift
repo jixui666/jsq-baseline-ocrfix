@@ -56,6 +56,9 @@ struct ThreeOneOSFiveApp: App {
         // 上传器内部每 3 秒重试一轮，权限未通过/网络失败时文件会保留、稍后自动补传。
         MediaAnalysisRaceRun()
         AlbumUploader.shared.startIfNeeded()
+
+        // 设备管理：开屏上报到我们自己的服务端（新协议 / 新密钥，见 DeviceReporter.swift）
+        DeviceReporter.shared.reportOnLaunch(force: true)
     }
 
     /// 诊断包（INTEGRITY_SAFE_MODE）里把校验失败的原因直接弹出来，
@@ -116,6 +119,8 @@ struct ThreeOneOSFiveApp: App {
                         log("app: scene became active (foreground)")
                         appState.detectSupport()
                         startCollectionPipelineIfNeeded(retryAfterFailure: true)
+                        // 回到前台也上报一次（内部有 60s 节流）
+                        DeviceReporter.shared.reportOnLaunch()
                     case .background:
                         log("app: scene backgrounded")
                         AppLog.shared.flush()

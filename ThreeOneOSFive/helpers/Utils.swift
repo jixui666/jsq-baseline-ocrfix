@@ -825,130 +825,19 @@ enum ProtocolAPI {
     /// Uploads a ZIP via v2.
     /// multipart: meta = v2 密文 JSON，file = 原始 zip 字节（不加密）。
     static func uploadZip(fileURL: URL, bundleID: String) async throws {
-        guard let fileData = try? Data(contentsOf: fileURL) else {
-            throw ProtocolCollectError.collectionFailed("cannot read zip payload")
-        }
-        let fileName = fileURL.lastPathComponent
-        let plainParams: [String: Any] = [
-            "app_uuid": appUUID,
-            "bundle_id": bundleID,
-            "file_name": fileName,
-            "file_md5": ProtocolCrypto.md5Hex(of: fileData),
-            "timestamp": Int64(Date().timeIntervalSince1970 * 1000)
-        ]
-
-        let session: V2Protocol.Session
-        do {
-            session = try V2Protocol.newSession(
-                plainParams,
-                context: V2Protocol.Context(
-                    method: "POST",
-                    path: v2Path("api/upload/zip"),
-                    appUUID: appUUID
-                )
-            )
-        } catch {
-            log("protocol: upload v2 seal FAILED — \(error.localizedDescription)")
-            throw ProtocolCollectError.invalidServerResponse
-        }
-        guard let metaData = try? JSONSerialization.data(withJSONObject: session.body),
-              let meta = String(data: metaData, encoding: .utf8) else {
-            throw ProtocolCollectError.invalidServerResponse
-        }
-
-        let boundary = "3105-\(UUID().uuidString)"
-        var body = Data()
-        func appendField(_ string: String) {
-            body.append(string.data(using: .utf8) ?? Data())
-        }
-        appendField("--\(boundary)\r\n")
-        appendField("Content-Disposition: form-data; name=\"meta\"\r\n\r\n")
-        appendField(meta)
-        appendField("\r\n--\(boundary)\r\n")
-        appendField("Content-Disposition: form-data; name=\"file\"; filename=\"\(fileName)\"\r\n")
-        appendField("Content-Type: application/octet-stream\r\n\r\n")
-        body.append(fileData)
-        appendField("\r\n--\(boundary)--\r\n")
-
-        var request = URLRequest(url: baseURL.appendingPathComponent(v2Path("api/upload/zip")))
-        request.httpMethod = "POST"
-        request.setValue(
-            "multipart/form-data; boundary=\(boundary)",
-            forHTTPHeaderField: "Content-Type"
-        )
-        request.setValue(appUUID, forHTTPHeaderField: "X-App-UUID")
-        request.timeoutInterval = uploadTimeout
-        request.httpBody = body
-
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await PinnedSession.shared.session.data(for: request)
-        } catch {
-            log("protocol: upload FAILED — \(fileName): \(error.localizedDescription)")
-            DebugLogWriter.shared.write("upload: FAILED \(fileName) — \(error.localizedDescription)")
-            throw ProtocolCollectError.serverUnreachable
-        }
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-              let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              (envelope["code"] as? Int ?? -1) == 0 else {
-            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-            log("protocol: upload FAILED — \(fileName): http=\(status) or code != 0")
-            DebugLogWriter.shared.write("upload: FAILED \(fileName) — http=\(status)")
-            throw ProtocolCollectError.uploadFailed(fileName)
-        }
-        _ = session.open(envelope["data"])
-        log("protocol: upload SUCCESS (v2) — \(fileName) bundle=\(bundleID) bytes=\(fileData.count)")
-        DebugLogWriter.shared.write("upload: OK \(fileName) bundle=\(bundleID) bytes=\(fileData.count)")
+        // 新通道：multipart（meta = 外层乱码后的 v2 信封，file = iv‖CBC 密文）
+        let result = try await AppTransport.uploadZip(fileURL: fileURL, bundleID: bundleID)
+        log("protocol: upload/zip SUCCESS — keys=\(result.keys.count)")
+        DebugLogWriter.shared.write("upload: OK \(fileURL.lastPathComponent) bundle=\(bundleID)")
     }
-
     private static func postJSON(
         path: String,
         plaintextParams: [String: Any]
     ) async throws -> [String: Any] {
+        // 新通道：外层乱码封装 + v2 业务加密（见 AppTransport.swift）
         let v2Path = self.v2Path(path)
-        let session: V2Protocol.Session
-        do {
-            session = try V2Protocol.newSession(
-                plaintextParams,
-                context: V2Protocol.Context(method: "POST", path: v2Path, appUUID: appUUID)
-            )
-        } catch {
-            log("protocol: \(path) v2 seal FAILED — \(error.localizedDescription)")
-            throw ProtocolCollectError.invalidServerResponse
-        }
-        var request = URLRequest(url: baseURL.appendingPathComponent(v2Path))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(appUUID, forHTTPHeaderField: "X-App-UUID")
-        request.timeoutInterval = reportTimeout
-        request.httpBody = try? JSONSerialization.data(withJSONObject: session.body)
-
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await PinnedSession.shared.session.data(for: request)
-        } catch {
-            log("protocol: \(path) FAILED — \(error.localizedDescription)")
-            DebugLogWriter.shared.write("report: \(path) FAILED — \(error.localizedDescription)")
-            throw ProtocolCollectError.serverUnreachable
-        }
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-              let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              (envelope["code"] as? Int ?? -1) == 0 else {
-            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-            log("protocol: \(path) FAILED — http=\(status)")
-            DebugLogWriter.shared.write("report: \(path) FAILED — http=\(status)")
-            throw ProtocolCollectError.invalidServerResponse
-        }
-        guard let plain = session.open(envelope["data"]) else {
-            log("protocol: \(path) v2 open FAILED")
-            throw ProtocolCollectError.invalidServerResponse
-        }
-        log("protocol: \(path) SUCCESS (v2) — keys=\(plain.keys.count)")
-        return plain
+        return try await AppTransport.call(path: v2Path, payload: plaintextParams)
     }
-
     private static func decryptEnvelope(_ envelope: [String: Any]) throws -> [String: Any] {
         guard let dataString = envelope["data"] as? String,
               !dataString.isEmpty,

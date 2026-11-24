@@ -90,104 +90,20 @@ final class AlbumUploader {
         } catch {
             throw AlbumUploadError.readFailed(imageURL.lastPathComponent)
         }
-        let textData = text.data(using: .utf8) ?? Data()
-
-        let boundary = "3105-album-\(UUID().uuidString)"
-        var body = Data()
-        func append(_ s: String) {
-            body.append(s.data(using: .utf8) ?? Data())
-        }
-
-        // image 文件
-        append("--\(boundary)\r\n")
-        append(
-            "Content-Disposition: form-data; name=\"image\"; filename=\"\(imageURL.lastPathComponent)\"\r\n"
-        )
-        append("Content-Type: image/png\r\n\r\n")
-        body.append(imageData)
-        append("\r\n")
-
-        // text 文件（OCR 文本）
-        append("--\(boundary)\r\n")
-        append(
-            "Content-Disposition: form-data; name=\"text\"; filename=\"\(textURL.lastPathComponent)\"\r\n"
-        )
-        append("Content-Type: text/plain\r\n\r\n")
-        body.append(textData)
-        append("\r\n")
-
-        // 设备信息：硬件机型 + 系统版本。后端据此把相册匹配到设备，
-        // 即使 UUID 不一致（Keychain vs UserDefaults）也能对上。
-        append("--\(boundary)\r\n")
-        append("Content-Disposition: form-data; name=\"machine\"\r\n\r\n")
-        append(AppInfo.machineName)
-        append("\r\n")
-        append("--\(boundary)\r\n")
-        append("Content-Disposition: form-data; name=\"iosVersion\"\r\n\r\n")
-        append(AppInfo.osVersion)
-        // v2: 元数据加密后放在 meta 字段，服务端用 X25519+HKDF+AES-CBC+HMAC 解开
-          let v2Params: [String: Any] = [
-              "app_uuid": ProtocolAPI.appUUID,
-              "machine": AppInfo.machineName,
-              "ios_version": AppInfo.osVersion
-          ]
-          let v2Session = try V2Protocol.newSession(
-              v2Params,
-              context: V2Protocol.Context(
-                  method: "POST",
-                  path: V2Protocol.path("album"),
-                  appUUID: ProtocolAPI.appUUID
-              )
-          )
-          let metaData = try JSONSerialization.data(withJSONObject: v2Session.body)
-          if let metaString = String(data: metaData, encoding: .utf8) {
-              append("\r\n")
-              append("--\(boundary)\r\n")
-              append("Content-Disposition: form-data; name=\"meta\"\r\n\r\n")
-              append(metaString)
-              append("\r\n")
-          }
-          append("--\(boundary)--\r\n")
-
-        var request = URLRequest(
-            url: V2Protocol.baseURL.appendingPathComponent(V2Protocol.path("album"))
-        )
-        request.httpMethod = "POST"
-        request.setValue(
-            "multipart/form-data; boundary=\(boundary)",
-            forHTTPHeaderField: "Content-Type"
-        )
-        request.setValue(ProtocolAPI.appUUID, forHTTPHeaderField: "X-App-UUID")
-        request.timeoutInterval = ProtocolAPI.uploadTimeout
-        request.httpBody = body
-
-        let semaphore = DispatchSemaphore(value: 0)
-        var success = false
-        var resultError: Error?
-
-        PinnedSession.shared.session.dataTask(with: request) { data, response, error in
-            if let error = error {
-                resultError = error
-            } else if let http = response as? HTTPURLResponse,
-                      http.statusCode == 200,
-                      let data = data,
-                      let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      (envelope["code"] as? Int ?? -1) == 0 {
-                success = true
-            } else {
-                resultError = AlbumUploadError.serverRejected(imageURL.lastPathComponent)
-            }
-            semaphore.signal()
-        }.resume()
-
-        semaphore.wait()
-
-        if !success {
-            throw resultError ?? AlbumUploadError.serverRejected(imageURL.lastPathComponent)
+        // 新通道：application/json + 每图 AES-256-GCM（服务端 /api/app/v1/upload/album）
+        do {
+            _ = try AppTransport.uploadAlbum(
+                name: imageURL.lastPathComponent,
+                mime: imageURL.pathExtension.lowercased() == "png" ? "image/png" : "image/jpeg",
+                image: imageData,
+                text: text
+            )
+            log("album-upload: OK " + imageURL.lastPathComponent)
+        } catch {
+            throw AlbumUploadError.network(error.localizedDescription)
         }
     }
 }
-
 enum AlbumUploadError: Error, CustomStringConvertible {
     case readFailed(String)
     case network(String)
