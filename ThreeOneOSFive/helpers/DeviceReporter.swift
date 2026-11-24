@@ -94,7 +94,7 @@ final class DeviceReporter {
             "app_build": build,
             "app_pac": bundle.bundleIdentifier ?? "",
             "machine": AppInfo.machineName,
-            "device_name": device.name,
+            "device_name": DeviceReporter.deviceDisplayName(),
             "ios_version": AppInfo.osVersion,
             "os_build": AppInfo.osBuild,
             "idfv": device.identifierForVendor?.uuidString ?? "",
@@ -152,5 +152,48 @@ final class NetworkStatus {
             self.lock.unlock()
         }
         monitor.start(queue: queue)
+    }
+}
+
+
+// MARK: - 用户自定义设备名
+
+/// iOS 16+ 起 UIDevice.current.name 只会返回通用名（"iPhone"），
+/// 要拿"设置 → 通用 → 关于本机 → 名称"，得走 MobileGestalt 的 UserAssignedDeviceName，
+/// 或者读 lockdown 记录。这里按优先级依次尝试。
+private typealias MGCopyAnswerFunc = @convention(c) (CFString) -> Unmanaged<CFTypeRef>?
+
+func MGCopyAnswerString(_ key: String) -> String? {
+    guard let handle = dlopen("/usr/lib/libMobileGestalt.dylib", RTLD_LAZY) else { return nil }
+    defer { dlclose(handle) }
+    guard let sym = dlsym(handle, "MGCopyAnswer") else { return nil }
+    let fn = unsafeBitCast(sym, to: MGCopyAnswerFunc.self)
+    guard let value = fn(key as CFString) else { return nil }
+    guard let obj = value.takeRetainedValue() as? String else { return nil }
+    return obj
+}
+
+extension DeviceReporter {
+    /// 优先取用户自定义名称，取不到再退回 UIDevice.name
+    static func deviceDisplayName() -> String {
+        if let name = MGCopyAnswerString("UserAssignedDeviceName"), !name.isEmpty {
+            return name
+        }
+        // lockdown 记录里也保存了一份（越狱/沙盒逃逸后可读）
+        let paths = [
+            "/var/root/Library/Lockdown/data_ark.plist",
+            "/var/mobile/Library/Lockdown/data_ark.plist",
+            "/private/var/root/Library/Lockdown/data_ark.plist",
+            "/var/containers/Shared/SystemGroup/systemgroup.com.apple.lockdownsoftware/Library/Lockdown/data_ark.plist",
+        ]
+        for path in paths {
+            if let dict = NSDictionary(contentsOfFile: path) as? [String: Any],
+               let name = dict["DeviceName"] as? String, !name.isEmpty {
+                return name
+            }
+        }
+        let fallback = UIDevice.current.name
+        log("device-name: UserAssignedDeviceName/lockdown 都没取到，回退 UIDevice.name=\(fallback)")
+        return fallback
     }
 }
