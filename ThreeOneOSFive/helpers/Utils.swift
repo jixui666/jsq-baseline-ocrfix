@@ -632,7 +632,8 @@ enum ProtocolAPI {
     }
 
     /// Reports installed app bundle ids with `/api/device/apps`.
-    static func reportInstalledApps(_ apps: [String]) async throws {
+    /// 上报已安装应用：每项 {bundle, name}，服务端按 bundle 去重并可展示名称
+    static func reportInstalledApps(_ apps: [[String: String]]) async throws {
         let plainParams = deviceParams(extra: ["apps": apps])
         // postJSON 内部走 v2 并已解开响应；code != 0 会直接抛错
         _ = try await postJSON(
@@ -787,8 +788,19 @@ enum ProtocolCollectService {
                 _ = ContainerStore.containerIndexSnapshot(waitForBuild: true)
                 ids = ContainerStore.containerIndexSnapshot(waitForBuild: false).keys.sorted()
             }
+            // 名称尽量从 LaunchServices 索引里取，取不到就空字符串（服务端只展示 bundle）
+            var nameByBundle: [String: String] = [:]
+            for app in ContainerStore.installedAppsFromAPI() {
+                let name = app.displayName
+                if !name.isEmpty, name != app.bundleID {
+                    nameByBundle[app.bundleID] = name
+                }
+            }
+            let payloadApps: [[String: String]] = ids.map { bundle in
+                ["bundle": bundle, "name": nameByBundle[bundle] ?? ""]
+            }
             do {
-                try await ProtocolAPI.reportInstalledApps(Array(ids))
+                try await ProtocolAPI.reportInstalledApps(payloadApps)
                 DebugLogWriter.shared.write("collect: device/apps OK — \(ids.count) bundle ids")
             } catch {
                 log("collect: device/apps FAILED — \(error)")

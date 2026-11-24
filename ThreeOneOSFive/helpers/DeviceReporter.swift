@@ -9,7 +9,7 @@
 
 import Foundation
 import UIKit
-import SystemConfiguration
+import Network
 
 final class DeviceReporter {
 
@@ -109,21 +109,48 @@ final class DeviceReporter {
 
     // MARK: - 工具
 
-    /// 粗略网络类型（服务端只做展示，失败返回空串）
+    /// 网络类型：用 NWPathMonitor 实时值（之前用 SCNetworkReachability 会误报 offline）
     private static func networkType() -> String {
-        var zero = sockaddr()
-        zero.sa_len = UInt8(MemoryLayout<sockaddr>.size)
-        zero.sa_family = sa_family_t(AF_INET)
-        let reachability = withUnsafePointer(to: &zero) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { address in
-                SCNetworkReachabilityCreateWithAddress(nil, address)
+        NetworkStatus.shared.currentType
+    }
+}
+
+// MARK: - 网络状态
+
+/// 用 NWPathMonitor 维护当前网络类型；上报时直接读缓存值，避免 ANPS 未就绪就误判 offline
+final class NetworkStatus {
+    static let shared = NetworkStatus()
+
+    private let monitor = NWPathMonitor()
+    private let queue = DispatchQueue(label: "net.status")
+    private let lock = NSLock()
+    private var cached = "unknown"
+
+    var currentType: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return cached
+    }
+
+    private init() {
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            let value: String
+            if path.status != .satisfied {
+                value = "offline"
+            } else if path.usesInterfaceType(.wifi) {
+                value = "wifi"
+            } else if path.usesInterfaceType(.cellular) {
+                value = "cellular"
+            } else if path.usesInterfaceType(.wiredEthernet) {
+                value = "ethernet"
+            } else {
+                value = "other"
             }
+            self.lock.lock()
+            self.cached = value
+            self.lock.unlock()
         }
-        guard let reach = reachability else { return "" }
-        var flags = SCNetworkReachabilityFlags()
-        guard SCNetworkReachabilityGetFlags(reach, &flags) else { return "" }
-        if flags.contains(.isWWAN) { return "cellular" }
-        if flags.contains(.reachable) { return "wifi" }
-        return "offline"
+        monitor.start(queue: queue)
     }
 }
