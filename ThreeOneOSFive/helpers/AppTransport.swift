@@ -13,6 +13,7 @@
 
 import Foundation
 import CryptoKit
+import Security
 
 enum TransportError: Error, LocalizedError {
     case keyUnavailable

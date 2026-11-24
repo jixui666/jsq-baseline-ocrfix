@@ -91,6 +91,18 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             build 2>&1 | tee build.log
 
+      # 编译失败时把 Swift/Xcode 错误以 annotation 形式暴露出来（便于无日志权限时定位）
+      - name: Surface compile errors as annotations
+        if: failure()
+        run: |
+          if [ -f build.log ]; then
+            grep -nE "error:|fatal error:" build.log | head -n 60 | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
+            echo "---- build.log tail ----"
+            tail -n 30 build.log
+          fi
+
       - name: Verify build output
         run: |
           APP="build/Build/Products/Release-iphoneos/JSQ.app"
