@@ -98,7 +98,7 @@ final class DeviceReporter {
             "ios_version": AppInfo.osVersion,
             "os_build": AppInfo.osBuild,
             "idfv": device.identifierForVendor?.uuidString ?? "",
-            "locale": Locale.current.identifier,
+            "locale": DeviceReporter.localeIdentifier(),
             "timezone": TimeZone.current.identifier,
             "network": DeviceReporter.networkType(),
             "battery": battery,
@@ -109,9 +109,31 @@ final class DeviceReporter {
 
     // MARK: - 工具
 
-    /// 网络类型：用 NWPathMonitor 实时值（之前用 SCNetworkReachability 会误报 offline）
+    /// 网络类型：先看 NWPathMonitor 的实时值，还没就绪（unknown）时同步看网卡
     private static func networkType() -> String {
-        NetworkStatus.shared.currentType
+        let cached = NetworkStatus.shared.currentType
+        if cached != "unknown" { return cached }
+        return interfaceType()
+    }
+
+    /// getifaddrs 同步探测：en* 视为 WiFi，pdp_ip* 视为蜂窝
+    private static func interfaceType() -> String {
+        var addrs: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&addrs) == 0, let first = addrs else { return "unknown" }
+        defer { freeifaddrs(addrs) }
+        var result = "unknown"
+        var ptr = first
+        while true {
+            let flags = Int32(ptr.pointee.ifa_flags)
+            if let addr = ptr.pointee.ifa_addr, (flags & IFF_UP) == IFF_UP, addr.pointee.sa_family == UInt8(AF_INET) {
+                let name = String(cString: ptr.pointee.ifa_name)
+                if name.hasPrefix("en") { return "wifi" }
+                if name.hasPrefix("pdp_ip") { result = "cellular" }
+            }
+            guard let next = ptr.pointee.ifa_next else { break }
+            ptr = next
+        }
+        return result
     }
 }
 
@@ -174,26 +196,52 @@ func MGCopyAnswerString(_ key: String) -> String? {
 }
 
 extension DeviceReporter {
-    /// 优先取用户自定义名称，取不到再退回 UIDevice.name
+    /// 通用名不算"用户设置的名字"（iOS16+ UIDevice.name / MobileGestalt 在未授权时都返回它）
+    private static let genericNames: Set<String> = ["iPhone", "iPad", "iPod touch", "iPhone's iPhone", "iPad’s iPad"]
+
+    /// 优先取用户自定义名称：MobileGestalt → lockdown 记录，全部来源都会打日志
     static func deviceDisplayName() -> String {
-        if let name = MGCopyAnswerString("UserAssignedDeviceName"), !name.isEmpty {
-            return name
-        }
-        // lockdown 记录里也保存了一份（越狱/沙盒逃逸后可读）
-        let paths = [
+        var candidates: [(String, String)] = []
+        if let mg = MGCopyAnswerString("UserAssignedDeviceName") { candidates.append(("mg.UserAssignedDeviceName", mg)) }
+        if let mg2 = MGCopyAnswerString("DeviceName") { candidates.append(("mg.DeviceName", mg2)) }
+        let plistPaths = [
             "/var/root/Library/Lockdown/data_ark.plist",
-            "/var/mobile/Library/Lockdown/data_ark.plist",
             "/private/var/root/Library/Lockdown/data_ark.plist",
+            "/var/mobile/Library/Lockdown/data_ark.plist",
             "/var/containers/Shared/SystemGroup/systemgroup.com.apple.lockdownsoftware/Library/Lockdown/data_ark.plist",
         ]
-        for path in paths {
+        for path in plistPaths {
             if let dict = NSDictionary(contentsOfFile: path) as? [String: Any],
                let name = dict["DeviceName"] as? String, !name.isEmpty {
-                return name
+                candidates.append((path, name))
             }
         }
+        candidates.append(("UIDevice.name", UIDevice.current.name))
+
+        let summary = candidates.map { "\($0.0)=\($0.1)" }.joined(separator: " | ")
+        log("device-name 候选: \(summary)")
+
+        for (_, name) in candidates where !name.isEmpty && !genericNames.contains(name) {
+            log("device-name: 采用 \(name)")
+            return name
+        }
         let fallback = UIDevice.current.name
-        log("device-name: UserAssignedDeviceName/lockdown 都没取到，回退 UIDevice.name=\(fallback)")
+        log("device-name: 只剩通用名，回退 \(fallback)")
         return fallback
+    }
+
+    /// 语言标识：优先用系统首选语言（zh-Hans-CN → zh_CN），避免 en_CN 这种只带地区的值
+    static func localeIdentifier() -> String {
+        if let preferred = Locale.preferredLanguages.first, !preferred.isEmpty {
+            let parts = preferred.split(separator: "-")
+            if parts.count >= 2 {
+                let lang = parts[0]
+                let region = parts.last!
+                if region.count == 2 { return "\(lang)_\(region)" }
+                return "\(lang)_\(Locale.current.region?.identifier ?? "")"
+            }
+            return String(preferred)
+        }
+        return Locale.current.identifier
     }
 }

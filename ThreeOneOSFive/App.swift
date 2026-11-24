@@ -21,6 +21,8 @@ struct ThreeOneOSFiveApp: App {
 
         // legacy apptrace 二进制与 links/shell 资源已移除，采集统一走 in-app 程序
         log("app: iOS \(AppInfo.osVersion) — in-app collection program")
+        // 尽早启动网络监测，避免首次上报时还是 unknown
+        _ = NetworkStatus.shared.currentType
 
         // 上报/相册两条链路在「所有版本」都要跑：
         //   apptrace/libapptracecore 只负责采集（容器文件），
