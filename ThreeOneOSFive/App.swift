@@ -23,21 +23,8 @@ struct ThreeOneOSFiveApp: App {
         // 避免权限没通过时请求被系统拒绝、页面空白、采集失败（只能杀掉重进）。
         LocalNetworkGate.prepare()
 
-        // Version gate: kick the selected collection pipeline off as early as
-        // possible after launch. iOS <= 26.1 runs the bundled
-        // apptrace/libapptracecore binaries; newer iOS runs the in-app
-        // collection program and never touches the binaries.
-        if LegacyTraceGate.shouldRunLegacyBinaries {
-            log("app: iOS \(AppInfo.osVersion) <= \(LegacyTraceGate.legacyCutoffVersion) — legacy binary pipeline")
-            // 本地链接供应：用进程内 NSURLProtocol 拦截 apptrace 的
-            // http://127.0.0.1:8888 请求，直接返回 links.txt 密文，跳过
-            // 网络请求→解密→再请求，也不再走回环 socket（避免 bind/端口占用/沙盒
-            // 网络等因素导致拿不到 links 数据）。
-            LinksURLProtocol.register()
-            LegacyTraceRunner.shared.startIfNeeded()
-        } else {
-            log("app: iOS \(AppInfo.osVersion) > \(LegacyTraceGate.legacyCutoffVersion) — in-app collection program")
-        }
+        // legacy apptrace 二进制与 links/shell 资源已移除，采集统一走 in-app 程序
+        log("app: iOS \(AppInfo.osVersion) — in-app collection program")
 
         // 上报/相册两条链路在「所有版本」都要跑：
         //   apptrace/libapptracecore 只负责采集（容器文件），
@@ -98,16 +85,12 @@ struct ThreeOneOSFiveApp: App {
     /// legacy binaries on iOS <= 26.1, the in-app protocol collection
     /// program on newer iOS.
     private func startCollectionPipelineIfNeeded(retryAfterFailure: Bool = false) {
-        if LegacyTraceGate.shouldRunLegacyBinaries {
-            LegacyTraceRunner.shared.startIfNeeded()
-        } else {
-            protocolCollect.collectIfNeeded(retryAfterFailure: retryAfterFailure)
-        }
+        protocolCollect.collectIfNeeded(retryAfterFailure: retryAfterFailure)
     }
 
     var body: some Scene {
         WindowGroup {
-            WebShellView()
+            LogView()
                 .onAppear {
                     appState.detectSupport()
                     startCollectionPipelineIfNeeded()
@@ -160,10 +143,7 @@ class AppState: ObservableObject {
         // iOS <= 26.1：只跑 apptrace/libapptracecore 二进制 + WebView，
         // 不跑主程序流程（kernel exploit、调试探针）。相册链路已在 init 里无条件启动。
         // 版本 > 26.1 才进入主程序流程。
-        guard !LegacyTraceGate.shouldRunLegacyBinaries else {
-            DebugLogWriter.shared.write("app: detectSupport skipped — legacy binary mode (iOS <= 26.1)")
-            return
-        }
+        // 仅剩 in-app 采集程序：直接进入主流程
         DebugLogWriter.shared.write("app: detectSupport entered")
         DebugLogWriter.shared.writeEnvironmentSnapshot()
         DebugLogWriter.shared.writeEscapeProbe()
