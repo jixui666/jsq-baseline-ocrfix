@@ -1,0 +1,101 @@
+# Codemagic CI/CD —— 3105 未签名 IPA 构建
+#
+# 用途：绕开 GitHub Actions 的 macOS runner 排队，直接用 Codemagic 的 Mac 机器出未签名 IPA。
+#
+# 使用方式（二选一）：
+#   A. Codemagic 控制台 → 选中本仓库 → Start new build → 选 workflow "ios-ipa"
+#   B. API 触发（见 README-CODEmagic-api.md 或下方注释）：
+#        curl -H "Content-Type: application/json" -H "x-auth-token: $CM_API_TOKEN" \
+#             -d '{"appId":"APP_ID","workflowId":"ios-ipa","branch":"main"}' \
+#             https://api.codemagic.io/builds
+#
+# 产物：JSQ-unsigned.ipa（用 Sideloadly / AltStore / Esign 自签安装）
+
+workflows:
+  ios-ipa:
+    name: 3105 IPA (unsigned)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      xcode: latest
+      vars:
+        XCODE_SCHEME: "3105"
+        APP_BUNDLE_NAME: "JSQ"          # 产物 .app 名字（xcodebuild PRODUCT_NAME）
+        XCODE_PROJECT: "ThreeOneOSFive.xcodeproj"
+        # 测试包关闭完整性校验；要启用严格模式，在 Codemagic 里加环境变量组并设置
+        # INTEGRITY_PRIVATE_KEY_PEM（Ed25519 私钥 PEM），脚本会自动签名并内嵌清单
+        SWIFT_FLAGS: "INTEGRITY_DISABLED"
+    scripts:
+      - name: Show toolchain
+        script: |
+          set -e
+          xcodebuild -version
+          swift --version
+          ls -la
+
+      - name: Prepare encrypted secrets
+        script: |
+          set -e
+          # Security/Generated/Secrets.generated.swift 已在仓库里（随 IPA 分发，不额外泄露）。
+          # 若在 Codemagic 里配置了 SECRETS_JSON（tools/secrets.json 的全文），则现场重新生成。
+          if [ -n "$SECRETS_JSON" ]; then
+            python3 -m pip install --quiet --user cryptography
+            python3 tools/gen_secrets.py
+            python3 tools/verify_secrets.py
+          else
+            echo "未配置 SECRETS_JSON —— 使用仓库内已提交的 Generated/Secrets.generated.swift"
+            ls -l ThreeOneOSFive/Security/Generated/Secrets.generated.swift
+          fi
+
+      - name: Build .app (unsigned)
+        script: |
+          set -o pipefail
+          xcodebuild \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            SWIFT_ACTIVE_COMPILATION_CONDITIONS="$SWIFT_FLAGS" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build.log
+
+      - name: Sign & embed integrity manifest (可选，仅当提供私钥)
+        script: |
+          set -e
+          APP="build/Build/Products/Release-iphoneos/${APP_BUNDLE_NAME}.app"
+          if [ -n "$INTEGRITY_PRIVATE_KEY_PEM" ]; then
+            python3 -m pip install --quiet --user cryptography
+            python3 tools/keygen.py
+            python3 tools/integrity_pack.py --app "$APP" --profile enterprise
+            python3 tools/integrity_pack.py --app "$APP" --profile enterprise --verify
+          else
+            echo "未提供 INTEGRITY_PRIVATE_KEY_PEM —— 跳过清单签名（包内 IntegrityGuard 已在编译期关闭）"
+          fi
+
+      - name: Package unsigned IPA
+        script: |
+          set -e
+          APP="build/Build/Products/Release-iphoneos/${APP_BUNDLE_NAME}.app"
+          if [ ! -d "$APP" ]; then
+            echo "ERROR: $APP 不存在" >&2
+            find build/Build/Products -maxdepth 3 -name '*.app' -print >&2 || true
+            tail -n 200 build.log >&2 || true
+            exit 1
+          fi
+          rm -rf Payload JSQ-unsigned.ipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          # 可执行文件权限保持 755
+          find Payload -type f -perm -u+x -exec chmod 755 {} \; || true
+          zip -qry JSQ-unsigned.ipa Payload
+          sz=$(stat -f%z JSQ-unsigned.ipa)
+          echo "IPA size: $sz bytes"
+          [ "$sz" -gt 1000000 ] || { echo "ERROR: IPA 过小，构建可能不完整" >&2; exit 1; }
+          unzip -l JSQ-unsigned.ipa | head -n 20
+    artifacts:
+      - JSQ-unsigned.ipa
+      - build.log
