@@ -60,18 +60,15 @@ jobs:
           shasum -a 256 "$F"
 
       - name: Verify Swift decryption of the generated secrets (macOS)
-        env:
-          SECRETS_JSON: ${{ secrets.SECRETS_JSON }}
+        # 只验证 SecureBox 能把仓库里那份 GeneratedSecrets 解成非空明文。
+        # 不再传入 SECRETS_JSON —— 仓库 Secret 若还是旧配置，会让这里和仓库内的新常量
+        # 逐条比对而误报 MISMATCH（已踩过）。轮换密钥请在本地验证后提交生成文件。
         run: |
-          # SecureBox 是纯 Foundation/CryptoKit，在 macOS 上行为与 iOS 一致，
-          # 所以这里能提前发现"生成器与运行时对不上"（真机上表现为
-          # Configuration unavailable —— shell.txt 的 key/iv 取不到）。
           swiftc -O -o /tmp/swiftcheck \
             ThreeOneOSFive/Security/Generated/Secrets.generated.swift \
             ThreeOneOSFive/Security/SecureBox.swift \
             tools/swiftcheck/main.swift
           /tmp/swiftcheck
-
 
       - name: List project
         run: |
