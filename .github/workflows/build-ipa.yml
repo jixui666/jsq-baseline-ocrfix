@@ -7,7 +7,7 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-15-intel   # Intel 池：arm64 池容量紧张，job 抢不到 runner
     timeout-minutes: 45
     steps:
       - name: Checkout
