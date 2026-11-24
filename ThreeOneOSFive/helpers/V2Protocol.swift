@@ -126,9 +126,12 @@ enum V2Protocol {
 
     private static func trustOnce(_ request: URLRequest) async throws -> Bool {
         let (data, response) = try await PinnedSession.shared.session.data(for: request)
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-              let env = try OuterLayer.open(data),
-
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            DebugLogWriter.shared.write("[trust] handshake http error")
+            return false
+        }
+        // 响应体是外层乱码封装 {d:"..."}，先解开外层，再取 serverPub
+        guard let env = try? OuterLayer.open(data),
               (env["code"] as? Int) == 0,
               let inner = env["data"] as? [String: Any],
               let pub = inner["serverPub"] as? String else {

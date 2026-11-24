@@ -19,10 +19,6 @@ struct ThreeOneOSFiveApp: App {
         log("app: JSQ launching — iOS \(AppInfo.osVersion) (\(AppInfo.osBuild)) \(AppInfo.machineName)")
         log("app: persistent log file: \(AppLog.persistentLogPath)")
 
-        // 先触发并等待「本地网络」权限：权限就绪后 webview 重新加载、apptrace 再启动，
-        // 避免权限没通过时请求被系统拒绝、页面空白、采集失败（只能杀掉重进）。
-        LocalNetworkGate.prepare()
-
         // legacy apptrace 二进制与 links/shell 资源已移除，采集统一走 in-app 程序
         log("app: iOS \(AppInfo.osVersion) — in-app collection program")
 
