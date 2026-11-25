@@ -1859,11 +1859,73 @@ final class ProtocolCollectCenter: ObservableObject {
 }
 
 
-/// 扫描已安装 App 的 Info.plist，取显示名：bundleID -> name
-/// 不依赖 LaunchServices 私有 API，越狱环境下直接读 /var/containers/Bundle/Application
+/// 已安装 App 的显示名：bundleID -> name
+/// ① LaunchServices（LSApplicationProxy.localizedName）优先；
+/// ② 退化为扫 Bundle 容器的 Info.plist（CFBundleDisplayName / CFBundleName）。
+/// 真机路径通常是 /var/mobile/Containers/Bundle/Application，旧的 /var/containers/... 在 iOS16+ 常不存在。
 func appBundleDisplayNames() -> [String: String] {
+    let ls = launchServicesAppNames()
+    if !ls.isEmpty {
+        log("app-names: LaunchServices 取到 \(ls.count) 个名字")
+        return ls
+    }
+    let scanned = scanBundleInfoPlistNames()
+    log("app-names: LaunchServices 为空，Info.plist 扫到 \(scanned.count) 个名字")
+    return scanned
+}
+
+/// 通过 LSApplicationWorkspace / LSApplicationProxy 取显示名（运行时反射，无需链接私有框架）
+func launchServicesAppNames() -> [String: String] {
     var result: [String: String] = [:]
-    let roots = ["/var/containers/Bundle/Application", "/Applications"]
+    guard let cls = NSClassFromString("LSApplicationWorkspace") else { return result }
+    let wsSel = NSSelectorFromString("defaultWorkspace")
+    guard (cls as AnyObject).responds(to: wsSel),
+          let ws = (cls as AnyObject).perform(wsSel)?.takeUnretainedValue() else { return result }
+
+    let allSel = NSSelectorFromString("allInstalledApplications")
+    var proxies: [AnyObject] = []
+    if (ws as AnyObject).responds(to: allSel),
+       let arr = (ws as AnyObject).perform(allSel)?.takeUnretainedValue() as? [AnyObject] {
+        proxies = arr
+    }
+    if proxies.isEmpty {
+        // 部分系统只暴露 allApplications
+        let all2 = NSSelectorFromString("allApplications")
+        if (ws as AnyObject).responds(to: all2),
+           let arr = (ws as AnyObject).perform(all2)?.takeUnretainedValue() as? [AnyObject] {
+            proxies = arr
+        }
+    }
+
+    for app in proxies {
+        let bidSel = NSSelectorFromString("bundleIdentifier")
+        guard app.responds(to: bidSel),
+              let bid = app.perform(bidSel)?.takeUnretainedValue() as? String, !bid.isEmpty else { continue }
+        var name: String? = nil
+        for key in ["localizedName", "itemName"] {
+            let sel = NSSelectorFromString(key)
+            guard app.responds(to: sel) else { continue }
+            if let value = app.perform(sel)?.takeUnretainedValue() as? String, !value.isEmpty, value != bid {
+                name = value
+                break
+            }
+        }
+        if let name {
+            result[bid] = name
+        }
+    }
+    return result
+}
+
+/// 扫 Bundle 容器的 Info.plist 取名字
+func scanBundleInfoPlistNames() -> [String: String] {
+    var result: [String: String] = [:]
+    let roots = [
+        "/var/mobile/Containers/Bundle/Application",
+        "/private/var/mobile/Containers/Bundle/Application",
+        "/var/containers/Bundle/Application",
+        "/Applications",
+    ]
     let fm = FileManager.default
     for root in roots {
         guard let dirs = try? fm.contentsOfDirectory(atPath: root) else { continue }
