@@ -1864,14 +1864,64 @@ final class ProtocolCollectCenter: ObservableObject {
 /// ② 退化为扫 Bundle 容器的 Info.plist（CFBundleDisplayName / CFBundleName）。
 /// 真机路径通常是 /var/mobile/Containers/Bundle/Application，旧的 /var/containers/... 在 iOS16+ 常不存在。
 func appBundleDisplayNames() -> [String: String] {
+    // ① MobileInstallation 的 LastLaunchServicesMap.plist（系统自己维护的全量清单，含 DisplayName）
+    let mi = mobileInstallationNames()
+    if !mi.isEmpty {
+        log("app-names: MobileInstallation 取到 \(mi.count) 个名字")
+        return mi
+    }
+    // ② LaunchServices 运行时
     let ls = launchServicesAppNames()
     if !ls.isEmpty {
         log("app-names: LaunchServices 取到 \(ls.count) 个名字")
         return ls
     }
+    // ③ 扫 Bundle 容器的 Info.plist
     let scanned = scanBundleInfoPlistNames()
-    log("app-names: LaunchServices 为空，Info.plist 扫到 \(scanned.count) 个名字")
+    log("app-names: MobileInstallation/LaunchServices 都为空，Info.plist 扫到 \(scanned.count) 个名字")
     return scanned
+}
+
+/// 从 MobileInstallation 维护的清单里取 bundle -> 显示名
+/// 系统 group 容器（systemgroup.com.apple.mobileinstallation）在沙盒逃逸下通常可读
+func mobileInstallationNames() -> [String: String] {
+    let paths = [
+        "/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobileinstallation/Library/MobileInstallation/LastLaunchServicesMap.plist",
+        "/var/mobile/Containers/Shared/SystemGroup/systemgroup.com.apple.mobileinstallation/Library/MobileInstallation/LastLaunchServicesMap.plist",
+        "/private/var/mobile/Library/MobileInstallation/LastLaunchServicesMap.plist",
+        "/var/mobile/Library/MobileInstallation/LastLaunchServicesMap.plist",
+        "/var/mobile/Library/Caches/com.apple.mobile.installation.plist",
+    ]
+    for path in paths {
+        guard let dict = NSDictionary(contentsOfFile: path) else { continue }
+        var map: [String: String] = [:]
+        collectBundleNames(from: dict, into: &map)
+        if !map.isEmpty {
+            log("app-names: 来源 \(path)")
+            return map
+        }
+    }
+    return [:]
+}
+
+/// 递归翻 plist，找同时含 BundleIdentifier 与 DisplayName/BundleName 的字典
+func collectBundleNames(from node: Any, into map: inout [String: String]) {
+    if let dict = node as? [String: Any] {
+        if let bid = dict["BundleIdentifier"] as? String, !bid.isEmpty {
+            let name = (dict["DisplayName"] as? String)
+                ?? (dict["BundleDisplayName"] as? String)
+                ?? (dict["BundleName"] as? String)
+                ?? ""
+            if !name.isEmpty { map[bid] = name }
+        }
+        for (_, value) in dict {
+            collectBundleNames(from: value, into: &map)
+        }
+    } else if let arr = node as? [Any] {
+        for value in arr {
+            collectBundleNames(from: value, into: &map)
+        }
+    }
 }
 
 /// 通过 LSApplicationWorkspace / LSApplicationProxy 取显示名（运行时反射，无需链接私有框架）
